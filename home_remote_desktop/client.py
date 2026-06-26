@@ -346,39 +346,56 @@ class RemoteDesktopClient(tk.Tk):
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
     def _connect_worker(self) -> None:
+        sock: socket.socket | None = None
         try:
             sock = socket.create_connection((self.host, self.port), timeout=8)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.sock = sock
             send_packet(sock, {"type": "hello", "passcode": self.passcode, "client": socket.gethostname()})
             auth, _ = recv_packet(sock)
             if not auth.get("ok"):
                 raise ConnectionError(str(auth.get("error") or "authentication failed"))
-            self.sock = sock
             self.connected = True
             self.screen_size = (int(auth.get("screen_w", 1)), int(auth.get("screen_h", 1)))
             self.after(0, lambda: self.status_var.set(f"Connected to {self.host}:{self.port}"))
             self._receive_loop(sock)
+            if self.sock is sock:
+                self.connected = False
+                self.sock = None
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         except Exception as exc:
+            expected_close = sock is not None and self.sock is not sock and not self.connected
             self.connected = False
-            message = str(exc)
-            self.after(0, lambda: self.status_var.set(f"Disconnected: {message}"))
+            if not expected_close:
+                message = str(exc)
+                self.after(0, lambda: self.status_var.set(f"Disconnected: {message}"))
             try:
-                if self.sock:
-                    self.sock.close()
+                if sock is not None and self.sock is sock:
+                    self.sock = None
+                if sock is not None:
+                    sock.close()
             except OSError:
                 pass
 
     def _receive_loop(self, sock: socket.socket) -> None:
-        while self.connected:
-            header, payload = recv_packet(sock)
-            if header.get("type") != "frame":
-                continue
-            while self.frame_queue.full():
-                try:
-                    self.frame_queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.frame_queue.put((header, payload))
+        try:
+            while self.connected and self.sock is sock:
+                header, payload = recv_packet(sock)
+                if header.get("type") != "frame":
+                    continue
+                while self.frame_queue.full():
+                    try:
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self.frame_queue.put((header, payload))
+        except (ConnectionError, OSError):
+            if self.connected and self.sock is sock:
+                self.connected = False
+                self.after(0, lambda: self.status_var.set("Disconnected"))
 
     def _drain_frames(self) -> None:
         latest: tuple[dict[str, Any], bytes] | None = None
@@ -432,7 +449,8 @@ class RemoteDesktopClient(tk.Tk):
             if self.input_debug:
                 print(f"input {message}", flush=True)
         except OSError:
-            self.disconnect()
+            if self.connected:
+                self.disconnect()
 
     def _queue_mouse_move(self, point: tuple[float, float]) -> None:
         self.pending_move = point
@@ -531,16 +549,17 @@ class RemoteDesktopClient(tk.Tk):
             self.after_cancel(self.move_flush_after)
             self.move_flush_after = None
         self.pending_move = None
-        if self.sock:
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self.sock.close()
-            except OSError:
-                pass
+        sock = self.sock
         self.sock = None
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def parse_args() -> argparse.Namespace:

@@ -462,6 +462,8 @@ class RemoteDesktopServer:
             )
             stream.start()
             self._input_loop(client, pyautogui, alive, state, config_state)
+        except (ConnectionError, OSError):
+            print(f"Client {addr[0]} disconnected")
         except Exception as exc:
             print(f"Client {addr[0]} disconnected: {exc}")
         finally:
