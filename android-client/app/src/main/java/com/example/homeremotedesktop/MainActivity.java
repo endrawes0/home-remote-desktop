@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     private EditText textField;
     private TextView statusView;
     private LinearLayout controls;
+    private Button connectButton;
     private Button fullscreenButton;
     private DesktopView desktopView;
     private RemoteConnection connection;
@@ -126,19 +127,18 @@ public class MainActivity extends Activity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         Button discoverButton = new Button(this);
-        discoverButton.setText("Discover");
+        discoverButton.setAllCaps(false);
+        discoverButton.setText("Find");
         discoverButton.setOnClickListener(v -> discoverServers());
         buttons.addView(discoverButton, new LinearLayout.LayoutParams(0, -2, 1));
-        Button connectButton = new Button(this);
+        connectButton = new Button(this);
+        connectButton.setAllCaps(false);
         connectButton.setText("Connect");
-        connectButton.setOnClickListener(v -> connect());
+        connectButton.setOnClickListener(v -> toggleConnection());
         buttons.addView(connectButton, new LinearLayout.LayoutParams(0, -2, 1));
-        Button disconnectButton = new Button(this);
-        disconnectButton.setText("Disconnect");
-        disconnectButton.setOnClickListener(v -> disconnect());
-        buttons.addView(disconnectButton, new LinearLayout.LayoutParams(0, -2, 1));
         fullscreenButton = new Button(this);
-        fullscreenButton.setText("Fullscreen");
+        fullscreenButton.setAllCaps(false);
+        fullscreenButton.setText("Full");
         fullscreenButton.setOnClickListener(v -> setFullscreen(!fullscreen));
         buttons.addView(fullscreenButton, new LinearLayout.LayoutParams(0, -2, 1));
         controls.addView(buttons);
@@ -151,10 +151,12 @@ public class MainActivity extends Activity {
         textField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         textRow.addView(textField, new LinearLayout.LayoutParams(0, -2, 1));
         Button typeButton = new Button(this);
+        typeButton.setAllCaps(false);
         typeButton.setText("Type");
         typeButton.setOnClickListener(v -> sendText());
         textRow.addView(typeButton, new LinearLayout.LayoutParams(-2, -2));
         Button enterButton = new Button(this);
+        enterButton.setAllCaps(false);
         enterButton.setText("Enter");
         enterButton.setOnClickListener(v -> sendPress("Return"));
         textRow.addView(enterButton, new LinearLayout.LayoutParams(-2, -2));
@@ -259,6 +261,14 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void toggleConnection() {
+        if (connection != null) {
+            disconnect();
+        } else {
+            connect();
+        }
+    }
+
     private void connect() {
         String host = hostField.getText().toString().trim();
         String passcode = passcodeField.getText().toString().trim();
@@ -277,6 +287,7 @@ public class MainActivity extends Activity {
         setStatus("Connecting...");
         RemoteConnection next = new RemoteConnection(host, port, passcode);
         connection = next;
+        updateConnectionButton();
         next.start();
     }
 
@@ -287,6 +298,7 @@ public class MainActivity extends Activity {
         }
         connection = null;
         setStatus("Disconnected");
+        updateConnectionButton();
     }
 
     private void sendText() {
@@ -327,7 +339,7 @@ public class MainActivity extends Activity {
     private void setFullscreen(boolean enabled) {
         fullscreen = enabled;
         controls.setVisibility(enabled ? View.GONE : View.VISIBLE);
-        fullscreenButton.setText(enabled ? "Exit Fullscreen" : "Fullscreen");
+        fullscreenButton.setText(enabled ? "Exit" : "Full");
         int flags = enabled
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
@@ -341,6 +353,10 @@ public class MainActivity extends Activity {
 
     private void setStatus(String status) {
         runOnUiThread(() -> statusView.setText(status));
+    }
+
+    private void updateConnectionButton() {
+        runOnUiThread(() -> connectButton.setText(connection == null ? "Connect" : "Stop"));
     }
 
     private void showToast(String message) {
@@ -410,6 +426,10 @@ public class MainActivity extends Activity {
                 }
             } finally {
                 close();
+                if (connection == this) {
+                    connection = null;
+                    updateConnectionButton();
+                }
             }
         }
 
