@@ -593,8 +593,10 @@ class RemoteDesktopServer:
                 config_state.update(self.stream_config_from_message(message))
                 continue
             if event in {"move", "down", "up", "click"}:
-                x = state.left + int(float(message.get("nx", 0)) * state.width)
-                y = state.top + int(float(message.get("ny", 0)) * state.height)
+                nx = min(1.0, max(0.0, float(message.get("nx", 0))))
+                ny = min(1.0, max(0.0, float(message.get("ny", 0))))
+                x = state.left + min(state.width - 1, int(nx * state.width))
+                y = state.top + min(state.height - 1, int(ny * state.height))
                 button = message.get("button", "left")
                 if event == "move":
                     pyautogui.moveTo(x, y)
@@ -752,7 +754,7 @@ def normalize_key(message: dict[str, Any]) -> str | None:
     char = message.get("char") or ""
     keysym = message.get("keysym") or ""
     if len(char) == 1 and char.isprintable():
-        return char.lower()
+        return char
     if keysym.startswith("F") and keysym[1:].isdigit():
         return keysym.lower()
     return KEY_MAP.get(keysym)

@@ -212,7 +212,7 @@ class PairProfile:
 
 
 class RemoteDesktopClient(tk.Tk):
-    def __init__(self, host: str | None, port: int, passcode: str | None):
+    def __init__(self, host: str | None, port: int, passcode: str | None, input_debug: bool = False):
         super().__init__()
         self.title("Home Remote Desktop")
         self.geometry("1100x720")
@@ -229,6 +229,11 @@ class RemoteDesktopClient(tk.Tk):
         self.image_size = (1, 1)
         self.screen_size = (1, 1)
         self.connected = False
+        self.input_debug = input_debug
+        self.fullscreen = False
+        self.pointer_down: dict[str, tuple[float, float]] = {}
+        self.pointer_dragging: set[str] = set()
+        self.pointer_threshold = 4
 
         self._build_ui()
         self.after(50, self._drain_frames)
@@ -238,35 +243,37 @@ class RemoteDesktopClient(tk.Tk):
             self.after(100, self.discover)
 
     def _build_ui(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 6))
-        toolbar.pack(side=tk.TOP, fill=tk.X)
+        self.toolbar = ttk.Frame(self, padding=(8, 6))
+        self.toolbar.pack(side=tk.TOP, fill=tk.X)
 
         self.server_var = tk.StringVar()
         self.servers: list[ServerInfo] = []
-        self.server_combo = ttk.Combobox(toolbar, textvariable=self.server_var, state="readonly", width=48)
+        self.server_combo = ttk.Combobox(self.toolbar, textvariable=self.server_var, state="readonly", width=48)
         self.server_combo.pack(side=tk.LEFT, padx=(0, 6))
 
-        ttk.Button(toolbar, text="Discover", command=self.discover).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="Connect", command=self._connect_selected).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="Disconnect", command=self.disconnect).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(self.toolbar, text="Discover", command=self.discover).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(self.toolbar, text="Connect", command=self._connect_selected).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(self.toolbar, text="Disconnect", command=self.disconnect).pack(side=tk.LEFT, padx=(0, 6))
+        self.fullscreen_button = ttk.Button(self.toolbar, text="Fullscreen", command=self.toggle_fullscreen)
+        self.fullscreen_button.pack(side=tk.LEFT, padx=(0, 12))
 
         self.status_var = tk.StringVar(value="Discovering servers...")
-        ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(self.toolbar, textvariable=self.status_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.canvas = tk.Canvas(self, bg="#101010", highlightthickness=0)
+        self.canvas = tk.Canvas(self, bg="#101010", highlightthickness=0, takefocus=True)
         self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda _event: self._redraw_current())
         self.canvas.bind("<Motion>", self._mouse_move)
-        self.canvas.bind("<ButtonPress-1>", lambda e: self._mouse_button(e, "down", "left"))
-        self.canvas.bind("<ButtonRelease-1>", lambda e: self._mouse_button(e, "up", "left"))
-        self.canvas.bind("<ButtonPress-2>", lambda e: self._mouse_button(e, "down", "middle"))
-        self.canvas.bind("<ButtonRelease-2>", lambda e: self._mouse_button(e, "up", "middle"))
-        self.canvas.bind("<ButtonPress-3>", lambda e: self._mouse_button(e, "down", "right"))
-        self.canvas.bind("<ButtonRelease-3>", lambda e: self._mouse_button(e, "up", "right"))
+        self.canvas.bind("<ButtonPress-1>", lambda e: self._mouse_press(e, "left"))
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._mouse_release(e, "left"))
+        self.canvas.bind("<ButtonPress-2>", lambda e: self._mouse_press(e, "middle"))
+        self.canvas.bind("<ButtonRelease-2>", lambda e: self._mouse_release(e, "middle"))
+        self.canvas.bind("<ButtonPress-3>", lambda e: self._mouse_press(e, "right"))
+        self.canvas.bind("<ButtonRelease-3>", lambda e: self._mouse_release(e, "right"))
         self.canvas.bind("<MouseWheel>", self._mouse_wheel)
         self.canvas.bind("<Enter>", lambda _event: self.canvas.focus_set())
-        self.canvas.bind("<KeyPress>", self._key_down)
-        self.canvas.bind("<KeyRelease>", self._key_up)
+        self.bind_all("<KeyPress>", self._key_down)
+        self.bind_all("<KeyRelease>", self._key_up)
 
     def discover(self) -> None:
         self.status_var.set("Searching local network...")
@@ -401,7 +408,8 @@ class RemoteDesktopClient(tk.Tk):
         self.canvas.configure(scrollregion=(x, y, x + draw_size[0], y + draw_size[1]))
 
     def _redraw_current(self) -> None:
-        pass
+        if self.desktop_image is not None:
+            self._show_image(self.desktop_image)
 
     def _normalized_point(self, event: tk.Event[Any]) -> tuple[float, float] | None:
         bbox = self.canvas.bbox("desktop")
@@ -418,29 +426,88 @@ class RemoteDesktopClient(tk.Tk):
         try:
             with self.send_lock:
                 send_packet(self.sock, {"type": "input", **message})
+            if self.input_debug:
+                print(f"input {message}", flush=True)
         except OSError:
             self.disconnect()
 
     def _mouse_move(self, event: tk.Event[Any]) -> None:
         point = self._normalized_point(event)
+        if not point:
+            return
+        for button, start in list(self.pointer_down.items()):
+            if button in self.pointer_dragging:
+                continue
+            dx = event.x - start[0]
+            dy = event.y - start[1]
+            if (dx * dx + dy * dy) >= self.pointer_threshold * self.pointer_threshold:
+                self.pointer_dragging.add(button)
+                self._send_input({"event": "down", "button": button, "nx": point[0], "ny": point[1]})
+        self._send_input({"event": "move", "nx": point[0], "ny": point[1]})
+
+    def _mouse_press(self, event: tk.Event[Any], button: str) -> None:
+        self.canvas.focus_set()
+        self.pointer_down[button] = (event.x, event.y)
+        self.pointer_dragging.discard(button)
+        point = self._normalized_point(event)
         if point:
             self._send_input({"event": "move", "nx": point[0], "ny": point[1]})
 
-    def _mouse_button(self, event: tk.Event[Any], action: str, button: str) -> None:
+    def _mouse_release(self, event: tk.Event[Any], button: str) -> None:
         self.canvas.focus_set()
         point = self._normalized_point(event)
-        if point:
-            self._send_input({"event": action, "button": button, "nx": point[0], "ny": point[1]})
+        dragging = button in self.pointer_dragging
+        self.pointer_down.pop(button, None)
+        self.pointer_dragging.discard(button)
+        if not point:
+            return
+        if dragging:
+            self._send_input({"event": "up", "button": button, "nx": point[0], "ny": point[1]})
+        else:
+            self._send_input({"event": "click", "button": button, "nx": point[0], "ny": point[1]})
 
     def _mouse_wheel(self, event: tk.Event[Any]) -> None:
         delta = 1 if event.delta > 0 else -1
         self._send_input({"event": "wheel", "delta": delta * 5})
 
-    def _key_down(self, event: tk.Event[Any]) -> None:
+    def _key_down(self, event: tk.Event[Any]) -> str | None:
+        if event.keysym == "F11":
+            self.toggle_fullscreen()
+            return "break"
+        if event.keysym == "Escape" and self.fullscreen:
+            self.toggle_fullscreen(False)
+            return "break"
+        if len(event.char) == 1 and event.char.isprintable():
+            self._send_input({"event": "text", "text": event.char})
+            return "break"
         self._send_input({"event": "key_down", "keysym": event.keysym, "char": event.char})
+        return None
 
-    def _key_up(self, event: tk.Event[Any]) -> None:
+    def _key_up(self, event: tk.Event[Any]) -> str | None:
+        if event.keysym in {"F11", "Escape"}:
+            return "break"
+        if len(event.char) == 1 and event.char.isprintable():
+            return "break"
         self._send_input({"event": "key_up", "keysym": event.keysym, "char": event.char})
+        return None
+
+    def toggle_fullscreen(self, enabled: bool | None = None) -> str:
+        self.fullscreen = (not self.fullscreen) if enabled is None else enabled
+        self.attributes("-fullscreen", self.fullscreen)
+        if self.fullscreen:
+            self.toolbar.pack_forget()
+            self.fullscreen_button.configure(text="Exit Fullscreen")
+        else:
+            self.toolbar.pack(side=tk.TOP, fill=tk.X, before=self.canvas)
+            self.fullscreen_button.configure(text="Fullscreen")
+        self.canvas.focus_set()
+        return "break"
+
+    def _escape(self, _event: tk.Event[Any]) -> str | None:
+        if self.fullscreen:
+            self.toggle_fullscreen(False)
+            return "break"
+        return None
 
     def disconnect(self) -> None:
         self.connected = False
@@ -470,6 +537,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pair-profile-sweep", action="store_true", help="Profile multiple configs against an already-running remote server")
     parser.add_argument("--pair-profile-output", default="pair-profile-recommendation.json", help="Pair profile recommendation JSON path")
     parser.add_argument("--pair-profile-seconds", type=float, default=6.0, help="Seconds to test each pair profile candidate")
+    parser.add_argument("--input-debug", action="store_true", help="Print each mouse/keyboard input packet sent by the GUI client")
     return parser.parse_args()
 
 
@@ -904,7 +972,7 @@ def main() -> None:
             raise SystemExit("--profile-seconds requires --host and --passcode")
         run_profile(args.host, args.port, args.passcode, args.profile_seconds, args.profile_output)
         return
-    app = RemoteDesktopClient(args.host, args.port, args.passcode)
+    app = RemoteDesktopClient(args.host, args.port, args.passcode, input_debug=args.input_debug)
     app.mainloop()
 
 

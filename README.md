@@ -100,6 +100,16 @@ If discovery is blocked by Windows Firewall, connect directly:
 .\run-client.bat --host 192.168.1.25 --passcode 123456
 ```
 
+Windows client controls:
+
+- Click the streamed desktop to left-click.
+- Drag to hold and move the left mouse button.
+- Right-click and middle-click are forwarded.
+- Type while the remote desktop area is focused to send text and non-text keys.
+- Use the mouse wheel to scroll.
+- Click **Fullscreen** or press `F11` for fullscreen. Press `Escape` to leave fullscreen.
+- Add `--input-debug` to print each input packet the client sends.
+
 ## Firewall
 
 Windows may ask whether Python can communicate on private networks. Allow it for private networks on both machines.
