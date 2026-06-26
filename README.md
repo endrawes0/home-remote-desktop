@@ -93,3 +93,21 @@ If discovery or connection is still blocked, create inbound firewall rules on th
 - The server streams the primary monitor only.
 - Keyboard support covers normal text keys, modifiers, arrows, function keys, and common navigation keys.
 - Performance depends heavily on Wi-Fi quality, screen resolution, and the `--scale`, `--fps`, and `--quality` settings.
+
+## Profiling
+
+The client can run a headless receive/decode profile, and the server can write capture/encode/send metrics when the client disconnects.
+
+In one terminal:
+
+```powershell
+.\run-server.bat --passcode 123456 --profile-output server-profile.json
+```
+
+In another terminal:
+
+```powershell
+.\run-client.bat --host 127.0.0.1 --passcode 123456 --profile-seconds 10 --profile-output client-profile.json
+```
+
+The JSON reports include FPS, bandwidth, payload size, capture time, JPEG encode time, send time, client frame wait/receive time, decode time, and end-to-end timing for same-machine tests.

@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
@@ -21,6 +21,8 @@ from .common import (
     DISCOVERY_PORT,
     recv_packet,
     send_packet,
+    summarize,
+    write_json,
 )
 
 
@@ -34,6 +36,83 @@ class ServerInfo:
     @property
     def label(self) -> str:
         return f"{self.name} ({self.host}:{self.port})"
+
+
+@dataclass
+class ClientProfile:
+    host: str
+    port: int
+    seconds: float
+    output_path: str
+    started_wall: float = field(default_factory=time.time)
+    frames: int = 0
+    bytes_received: int = 0
+    receive_ms: list[float] = field(default_factory=list)
+    decode_ms: list[float] = field(default_factory=list)
+    end_to_end_ms: list[float] = field(default_factory=list)
+    inter_frame_ms: list[float] = field(default_factory=list)
+    payload_bytes: list[float] = field(default_factory=list)
+    image_width: int = 0
+    image_height: int = 0
+    screen_width: int = 0
+    screen_height: int = 0
+    first_frame_wall: float | None = None
+    last_frame_wall: float | None = None
+
+    def record(
+        self,
+        *,
+        header: dict[str, Any],
+        payload_size: int,
+        receive_ms: float,
+        decode_ms: float,
+        received_wall_ns: int,
+    ) -> None:
+        now = time.time()
+        if self.last_frame_wall is not None:
+            self.inter_frame_ms.append((now - self.last_frame_wall) * 1000.0)
+        self.first_frame_wall = self.first_frame_wall or now
+        self.last_frame_wall = now
+        self.frames += 1
+        self.bytes_received += payload_size
+        self.receive_ms.append(receive_ms)
+        self.decode_ms.append(decode_ms)
+        self.payload_bytes.append(float(payload_size))
+        self.image_width = int(header.get("image_w", 0))
+        self.image_height = int(header.get("image_h", 0))
+        self.screen_width = int(header.get("screen_w", 0))
+        self.screen_height = int(header.get("screen_h", 0))
+        server_wall_ns = int(header.get("server_wall_ns") or 0)
+        if server_wall_ns:
+            self.end_to_end_ms.append((received_wall_ns - server_wall_ns) / 1_000_000.0)
+
+    def write(self) -> None:
+        elapsed = max(0.001, time.time() - self.started_wall)
+        active_elapsed = elapsed
+        if self.first_frame_wall is not None and self.last_frame_wall is not None:
+            active_elapsed = max(0.001, self.last_frame_wall - self.first_frame_wall)
+        write_json(
+            self.output_path,
+            {
+                "role": "client",
+                "host": self.host,
+                "port": self.port,
+                "requested_seconds": self.seconds,
+                "elapsed_seconds": elapsed,
+                "active_elapsed_seconds": active_elapsed,
+                "frames": self.frames,
+                "fps": self.frames / active_elapsed,
+                "mbps": (self.bytes_received * 8.0 / active_elapsed) / 1_000_000,
+                "bytes_received": self.bytes_received,
+                "screen": {"width": self.screen_width, "height": self.screen_height},
+                "stream": {"width": self.image_width, "height": self.image_height},
+                "payload_bytes": summarize(self.payload_bytes),
+                "frame_wait_receive_ms": summarize(self.receive_ms),
+                "decode_ms": summarize(self.decode_ms),
+                "end_to_end_ms": summarize(self.end_to_end_ms),
+                "inter_frame_ms": summarize(self.inter_frame_ms),
+            },
+        )
 
 
 class RemoteDesktopClient(tk.Tk):
@@ -284,11 +363,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=None, help="Server IP or hostname. Omit to use discovery.")
     parser.add_argument("--port", type=int, default=DEFAULT_TCP_PORT, help="Server TCP port")
     parser.add_argument("--passcode", default=None, help="Server passcode")
+    parser.add_argument("--profile-seconds", type=float, default=0.0, help="Run headless receive/decode profiling for N seconds")
+    parser.add_argument("--profile-output", default="client-profile.json", help="Profiling JSON output path")
     return parser.parse_args()
+
+
+def run_profile(host: str, port: int, passcode: str, seconds: float, output_path: str) -> None:
+    profile = ClientProfile(host=host, port=port, seconds=seconds, output_path=output_path)
+    sock = socket.create_connection((host, port), timeout=8)
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        send_packet(sock, {"type": "hello", "passcode": passcode, "client": socket.gethostname(), "profile": True})
+        auth, _ = recv_packet(sock)
+        if not auth.get("ok"):
+            raise ConnectionError(str(auth.get("error") or "authentication failed"))
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            receive_started = time.perf_counter()
+            header, payload = recv_packet(sock)
+            received = time.perf_counter()
+            received_wall_ns = time.time_ns()
+            if header.get("type") != "frame":
+                continue
+            decode_started = time.perf_counter()
+            image = Image.open(io.BytesIO(payload))
+            image.load()
+            decoded = time.perf_counter()
+            profile.record(
+                header=header,
+                payload_size=len(payload),
+                receive_ms=(received - receive_started) * 1000.0,
+                decode_ms=(decoded - decode_started) * 1000.0,
+                received_wall_ns=received_wall_ns,
+            )
+    finally:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+        profile.write()
 
 
 def main() -> None:
     args = parse_args()
+    if args.profile_seconds > 0:
+        if not args.host or not args.passcode:
+            raise SystemExit("--profile-seconds requires --host and --passcode")
+        run_profile(args.host, args.port, args.passcode, args.profile_seconds, args.profile_output)
+        return
     app = RemoteDesktopClient(args.host, args.port, args.passcode)
     app.mainloop()
 
