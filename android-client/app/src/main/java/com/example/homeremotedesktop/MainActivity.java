@@ -44,6 +44,8 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int DISCOVERY_PORT = 51333;
@@ -469,6 +471,7 @@ public class MainActivity extends Activity {
         private final int port;
         private final String passcode;
         private final Object sendLock = new Object();
+        private final ExecutorService inputExecutor = Executors.newSingleThreadExecutor();
         private volatile boolean running = true;
         private volatile Socket socket;
         private volatile OutputStream output;
@@ -531,18 +534,24 @@ public class MainActivity extends Activity {
             if (!running || output == null) {
                 return;
             }
-            try {
-                JSONObject envelope = new JSONObject(message.toString());
-                envelope.put("type", "input");
-                synchronized (sendLock) {
-                    sendPacket(output, envelope, null);
+            inputExecutor.execute(() -> {
+                if (!running || output == null) {
+                    return;
                 }
-            } catch (Exception ignored) {
-            }
+                try {
+                    JSONObject envelope = new JSONObject(message.toString());
+                    envelope.put("type", "input");
+                    synchronized (sendLock) {
+                        sendPacket(output, envelope, null);
+                    }
+                } catch (Exception ignored) {
+                }
+            });
         }
 
         void close() {
             running = false;
+            inputExecutor.shutdownNow();
             try {
                 if (socket != null) {
                     socket.close();
@@ -638,6 +647,9 @@ public class MainActivity extends Activity {
         private InputSender inputSender;
         private Runnable fullscreenToggle;
         private boolean dragging;
+        private boolean touchpadMode;
+        private float lastX;
+        private float lastY;
         private float downX;
         private float downY;
         private float downNx;
@@ -702,35 +714,58 @@ public class MainActivity extends Activity {
             if (inputSender == null || drawRect.isEmpty()) {
                 return true;
             }
-            float x = clamp(event.getX(), drawRect.left, drawRect.right);
-            float y = clamp(event.getY(), drawRect.top, drawRect.bottom);
+            float rawX = event.getX();
+            float rawY = event.getY();
+            float x = clamp(rawX, drawRect.left, drawRect.right);
+            float y = clamp(rawY, drawRect.top, drawRect.bottom);
             float nx = (x - drawRect.left) / drawRect.width();
             float ny = (y - drawRect.top) / drawRect.height();
             try {
                 if (action == MotionEvent.ACTION_DOWN) {
                     requestFocus();
+                    touchpadMode = !drawRect.contains(rawX, rawY);
                     dragging = false;
-                    downX = x;
-                    downY = y;
+                    downX = rawX;
+                    downY = rawY;
+                    lastX = rawX;
+                    lastY = rawY;
                     downNx = clamp(nx);
                     downNy = clamp(ny);
                     downAt = System.currentTimeMillis();
-                    sendPointer("move", nx, ny);
+                    if (!touchpadMode) {
+                        sendPointer("move", nx, ny);
+                    }
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     if (dragging) {
-                        sendPointer("up", nx, ny);
+                        if (!touchpadMode) {
+                            sendPointer("up", nx, ny);
+                        }
                     } else if (action == MotionEvent.ACTION_UP && System.currentTimeMillis() - downAt < 800) {
-                        sendPointer("click", nx, ny);
+                        if (touchpadMode) {
+                            sendCurrentPointer("click_current");
+                        } else {
+                            sendPointer("click", nx, ny);
+                        }
                     }
                     dragging = false;
                 } else if (action == MotionEvent.ACTION_MOVE) {
-                    float dx = x - downX;
-                    float dy = y - downY;
+                    float dx = rawX - downX;
+                    float dy = rawY - downY;
                     if (!dragging && Math.hypot(dx, dy) >= dragThreshold) {
                         dragging = true;
-                        sendPointer("down", downNx, downNy);
+                        if (!touchpadMode) {
+                            sendPointer("down", downNx, downNy);
+                        }
                     }
-                    sendPointer("move", nx, ny);
+                    if (touchpadMode) {
+                        if (dragging) {
+                            sendRelativePointer(rawX - lastX, rawY - lastY);
+                        }
+                    } else {
+                        sendPointer("move", nx, ny);
+                    }
+                    lastX = rawX;
+                    lastY = rawY;
                 } else {
                     return true;
                 }
@@ -751,6 +786,21 @@ public class MainActivity extends Activity {
             message.put("button", "left");
             message.put("nx", clamp(nx));
             message.put("ny", clamp(ny));
+            inputSender.send(message);
+        }
+
+        private void sendCurrentPointer(String event) throws Exception {
+            JSONObject message = new JSONObject();
+            message.put("event", event);
+            message.put("button", "left");
+            inputSender.send(message);
+        }
+
+        private void sendRelativePointer(float dx, float dy) throws Exception {
+            JSONObject message = new JSONObject();
+            message.put("event", "move_relative");
+            message.put("dx", dx);
+            message.put("dy", dy);
             inputSender.send(message);
         }
 

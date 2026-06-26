@@ -615,6 +615,19 @@ class RemoteDesktopServer:
             if event == "set_stream_config":
                 config_state.update(self.stream_config_from_message(message))
                 continue
+            if event == "move_relative":
+                dx = float(message.get("dx", 0))
+                dy = float(message.get("dy", 0))
+                if self.trace_input:
+                    print(f"Input: move_relative dx={dx:.1f} dy={dy:.1f}", flush=True)
+                pyautogui.moveRel(dx, dy, duration=0)
+                continue
+            if event == "click_current":
+                button = message.get("button", "left")
+                if self.trace_input:
+                    print(f"Input: click_current {button}", flush=True)
+                pyautogui.click(button=button)
+                continue
             if event in {"move", "down", "up", "click"}:
                 nx = min(1.0, max(0.0, float(message.get("nx", 0))))
                 ny = min(1.0, max(0.0, float(message.get("ny", 0))))
