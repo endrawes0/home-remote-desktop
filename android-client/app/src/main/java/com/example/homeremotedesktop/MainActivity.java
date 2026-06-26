@@ -270,6 +270,8 @@ public class MainActivity extends Activity {
 
         Button winButton = addSpecialButton(row, "Win", 64);
         winButton.setOnClickListener(v -> sendPress("Super_L"));
+        Button keyboardButton = addSpecialButton(row, "Kbd", 64);
+        keyboardButton.setOnClickListener(v -> showSoftwareKeyboard());
         ctrlButton = addSpecialButton(row, "Ctrl", 64);
         ctrlButton.setOnClickListener(v -> toggleModifier("Control_L"));
         altButton = addSpecialButton(row, "Alt", 64);
@@ -577,6 +579,17 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
     }
 
+    private void showSoftwareKeyboard() {
+        runOnUiThread(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) {
+                return;
+            }
+            keyboardSink.requestFocus();
+            imm.showSoftInput(keyboardSink, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
     private void handleIme(JSONObject message) {
         String action = message.optString("action", "hide");
         runOnUiThread(() -> {
@@ -585,8 +598,7 @@ public class MainActivity extends Activity {
                 return;
             }
             if ("show".equals(action)) {
-                keyboardSink.requestFocus();
-                imm.showSoftInput(keyboardSink, InputMethodManager.SHOW_IMPLICIT);
+                showSoftwareKeyboard();
             } else {
                 keyboardSink.clearFocus();
                 imm.hideSoftInputFromWindow(keyboardSink.getWindowToken(), 0);
