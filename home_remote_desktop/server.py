@@ -606,6 +606,14 @@ class RemoteDesktopServer:
                     pyautogui.click(x, y, button=button)
             elif event == "wheel":
                 pyautogui.scroll(int(message.get("delta", 0)))
+            elif event == "text":
+                text = str(message.get("text", ""))
+                if text:
+                    pyautogui.write(text, interval=0)
+            elif event == "press":
+                key = normalize_key(message)
+                if key:
+                    pyautogui.press(key)
             elif event in {"key_down", "key_up"}:
                 key = normalize_key(message)
                 if key:

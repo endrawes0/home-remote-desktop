@@ -50,9 +50,13 @@ public class MainActivity extends Activity {
     private EditText hostField;
     private EditText portField;
     private EditText passcodeField;
+    private EditText textField;
     private TextView statusView;
+    private LinearLayout controls;
+    private Button fullscreenButton;
     private DesktopView desktopView;
     private RemoteConnection connection;
+    private boolean fullscreen;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,7 +77,7 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(18, 18, 18));
 
-        LinearLayout controls = new LinearLayout(this);
+        controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(16, 16, 16, 10);
         controls.setBackgroundColor(Color.rgb(245, 245, 245));
@@ -133,7 +137,28 @@ public class MainActivity extends Activity {
         disconnectButton.setText("Disconnect");
         disconnectButton.setOnClickListener(v -> disconnect());
         buttons.addView(disconnectButton, new LinearLayout.LayoutParams(0, -2, 1));
+        fullscreenButton = new Button(this);
+        fullscreenButton.setText("Fullscreen");
+        fullscreenButton.setOnClickListener(v -> setFullscreen(!fullscreen));
+        buttons.addView(fullscreenButton, new LinearLayout.LayoutParams(0, -2, 1));
         controls.addView(buttons);
+
+        LinearLayout textRow = new LinearLayout(this);
+        textRow.setOrientation(LinearLayout.HORIZONTAL);
+        textField = new EditText(this);
+        textField.setHint("Text to type");
+        textField.setSingleLine(true);
+        textField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        textRow.addView(textField, new LinearLayout.LayoutParams(0, -2, 1));
+        Button typeButton = new Button(this);
+        typeButton.setText("Type");
+        typeButton.setOnClickListener(v -> sendText());
+        textRow.addView(typeButton, new LinearLayout.LayoutParams(-2, -2));
+        Button enterButton = new Button(this);
+        enterButton.setText("Enter");
+        enterButton.setOnClickListener(v -> sendPress("Return"));
+        textRow.addView(enterButton, new LinearLayout.LayoutParams(-2, -2));
+        controls.addView(textRow);
 
         statusView = new TextView(this);
         statusView.setTextColor(Color.rgb(40, 40, 40));
@@ -147,6 +172,7 @@ public class MainActivity extends Activity {
                 active.sendInput(message);
             }
         });
+        desktopView.setFullscreenToggle(() -> setFullscreen(!fullscreen));
 
         root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
         root.addView(desktopView, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -261,6 +287,56 @@ public class MainActivity extends Activity {
         }
         connection = null;
         setStatus("Disconnected");
+    }
+
+    private void sendText() {
+        RemoteConnection active = connection;
+        if (active == null) {
+            showToast("Not connected");
+            return;
+        }
+        String text = textField.getText().toString();
+        if (text.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", "text");
+            message.put("text", text);
+            active.sendInput(message);
+            textField.setText("");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void sendPress(String keysym) {
+        RemoteConnection active = connection;
+        if (active == null) {
+            showToast("Not connected");
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", "press");
+            message.put("keysym", keysym);
+            active.sendInput(message);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void setFullscreen(boolean enabled) {
+        fullscreen = enabled;
+        controls.setVisibility(enabled ? View.GONE : View.VISIBLE);
+        fullscreenButton.setText(enabled ? "Exit Fullscreen" : "Fullscreen");
+        int flags = enabled
+                ? View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                : View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+        getWindow().getDecorView().setSystemUiVisibility(flags);
     }
 
     private void setStatus(String status) {
@@ -446,14 +522,27 @@ public class MainActivity extends Activity {
         private Bitmap bitmap;
         private RectF drawRect = new RectF();
         private InputSender inputSender;
+        private Runnable fullscreenToggle;
+        private boolean dragging;
+        private float downX;
+        private float downY;
+        private float downNx;
+        private float downNy;
+        private long downAt;
+        private final float dragThreshold;
 
         public DesktopView(Activity activity) {
             super(activity);
             setBackgroundColor(Color.rgb(12, 12, 12));
+            dragThreshold = 12f * getResources().getDisplayMetrics().density;
         }
 
         void setInputSender(InputSender inputSender) {
             this.inputSender = inputSender;
+        }
+
+        void setFullscreenToggle(Runnable fullscreenToggle) {
+            this.fullscreenToggle = fullscreenToggle;
         }
 
         void setBitmap(Bitmap bitmap) {
@@ -486,6 +575,13 @@ public class MainActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            int action = event.getActionMasked();
+            if (event.getPointerCount() >= 2 && action == MotionEvent.ACTION_POINTER_DOWN) {
+                if (fullscreenToggle != null) {
+                    fullscreenToggle.run();
+                }
+                return true;
+            }
             if (inputSender == null || drawRect.isEmpty()) {
                 return true;
             }
@@ -497,33 +593,52 @@ public class MainActivity extends Activity {
             float nx = (x - drawRect.left) / drawRect.width();
             float ny = (y - drawRect.top) / drawRect.height();
             try {
-                JSONObject message = new JSONObject();
-                int action = event.getActionMasked();
                 if (action == MotionEvent.ACTION_DOWN) {
-                    message.put("event", "down");
-                    message.put("button", "left");
+                    dragging = false;
+                    downX = x;
+                    downY = y;
+                    downNx = clamp(nx);
+                    downNy = clamp(ny);
+                    downAt = System.currentTimeMillis();
+                    sendPointer("move", nx, ny);
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                    message.put("event", "up");
-                    message.put("button", "left");
+                    if (dragging) {
+                        sendPointer("up", nx, ny);
+                    } else if (action == MotionEvent.ACTION_UP && System.currentTimeMillis() - downAt < 800) {
+                        sendPointer("click", nx, ny);
+                    }
+                    dragging = false;
                 } else if (action == MotionEvent.ACTION_MOVE) {
-                    message.put("event", "move");
+                    float dx = x - downX;
+                    float dy = y - downY;
+                    if (!dragging && Math.hypot(dx, dy) >= dragThreshold) {
+                        dragging = true;
+                        sendPointer("down", downNx, downNy);
+                    }
+                    sendPointer("move", nx, ny);
                 } else {
                     return true;
                 }
-                message.put("nx", clamp(nx));
-                message.put("ny", clamp(ny));
-                inputSender.send(message);
             } catch (Exception ignored) {
             }
             return true;
         }
 
-        private static double clamp(float value) {
+        private void sendPointer(String event, float nx, float ny) throws Exception {
+            JSONObject message = new JSONObject();
+            message.put("event", event);
+            message.put("button", "left");
+            message.put("nx", clamp(nx));
+            message.put("ny", clamp(ny));
+            inputSender.send(message);
+        }
+
+        private static float clamp(float value) {
             if (value < 0f) {
-                return 0.0;
+                return 0f;
             }
             if (value > 1f) {
-                return 1.0;
+                return 1f;
             }
             return value;
         }
@@ -533,4 +648,3 @@ public class MainActivity extends Activity {
         void send(JSONObject message);
     }
 }
-
