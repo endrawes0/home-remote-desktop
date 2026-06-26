@@ -34,6 +34,10 @@ On both Windows machines, open PowerShell in this folder and run:
 .\install.bat
 ```
 
+If `install.bat` reports that Python is missing, close and reopen PowerShell after installing Python, then run `.\install.bat` again.
+
+Inside a Codex desktop workspace, the helper scripts `run-client-codex-python.bat` and `run-server-codex-python.bat` can use Codex's bundled Python runtime.
+
 ## Run The Server
 
 On the Windows 11 machine you want to control:
