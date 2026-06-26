@@ -38,6 +38,18 @@ If `install.bat` reports that Python is missing, close and reopen PowerShell aft
 
 Inside a Codex desktop workspace, the helper scripts `run-client-codex-python.bat` and `run-server-codex-python.bat` can use Codex's bundled Python runtime.
 
+Optional performance backends:
+
+```powershell
+py -m pip install -r requirements-performance.txt
+```
+
+TurboJPEG also requires the native libjpeg-turbo DLL. If it is not discoverable automatically, pass it explicitly:
+
+```powershell
+.\run-server.bat --jpeg-backend turbojpeg --turbojpeg-lib-path C:\path\to\turbojpeg.dll
+```
+
 ## Run The Server
 
 On the Windows 11 machine you want to control:
@@ -54,7 +66,18 @@ Useful options:
 .\run-server.bat --fps 15 --quality 75 --scale 0.8
 .\run-server.bat --passcode 123456
 .\run-server.bat --port 51334
+.\run-server.bat --capture-backend auto --jpeg-backend auto --delta-mode tiles --tile-size 384 --no-jpeg-optimize
 ```
+
+Performance flags:
+
+- `--capture-backend mss|dxcam|auto` uses the original MSS capture path, optional DXCam, or DXCam with MSS fallback.
+- `--jpeg-backend pillow|turbojpeg|auto` uses Pillow, optional TurboJPEG, or TurboJPEG with Pillow fallback.
+- `--turbojpeg-lib-path` points PyTurboJPEG at the native `turbojpeg.dll` when automatic discovery fails.
+- `--jpeg-optimize` / `--no-jpeg-optimize` controls Pillow's JPEG optimize pass. The default is `--no-jpeg-optimize` for lower latency.
+- `--delta-mode off|tiles` sends full frames or changed JPEG tiles after the first full frame.
+- `--tile-size` controls delta tile dimensions.
+- `--full-frame-interval` sends a full refresh every N frames in tile mode.
 
 ## Run The Client
 
@@ -111,3 +134,11 @@ In another terminal:
 ```
 
 The JSON reports include FPS, bandwidth, payload size, capture time, JPEG encode time, send time, client frame wait/receive time, decode time, and end-to-end timing for same-machine tests.
+
+To test several configurations on the current machine and write a recommendation:
+
+```powershell
+.\run-client.bat --profile-config-sweep --profile-config-seconds 6 --profile-config-output profile-recommendation.json
+```
+
+The recommendation includes suggested server and client commands. Run it on each machine you care about, because the best settings depend on display resolution, CPU/GPU, and installed optional backends.

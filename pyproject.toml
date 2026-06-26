@@ -14,10 +14,17 @@ dependencies = [
   "pyautogui>=0.9.54",
 ]
 
+[project.optional-dependencies]
+performance = [
+  "dxcam>=0.0.5",
+  "numpy>=1.26",
+  "opencv-python>=4.9",
+  "PyTurboJPEG>=1.7",
+]
+
 [project.scripts]
 hrd-server = "home_remote_desktop.server:main"
 hrd-client = "home_remote_desktop.client:main"
 
 [tool.setuptools.packages.find]
 include = ["home_remote_desktop*"]
-

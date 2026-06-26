@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 from .common import (
     ANNOUNCE_TYPE,
@@ -59,6 +59,17 @@ class CaptureState:
 
 
 @dataclass
+class EncodedFrame:
+    mode: str
+    payload: bytes
+    tiles: list[dict[str, int]]
+    changed_tiles: int
+    total_tiles: int
+    image_width: int
+    image_height: int
+
+
+@dataclass
 class ServerProfile:
     output_path: str
     started_wall: float = field(default_factory=time.time)
@@ -70,6 +81,8 @@ class ServerProfile:
     send_ms: list[float] = field(default_factory=list)
     frame_total_ms: list[float] = field(default_factory=list)
     payload_bytes: list[float] = field(default_factory=list)
+    changed_tiles: list[float] = field(default_factory=list)
+    total_tiles: list[float] = field(default_factory=list)
     image_width: int = 0
     image_height: int = 0
     screen_width: int = 0
@@ -77,6 +90,13 @@ class ServerProfile:
     quality: int = 0
     scale: float = 0.0
     fps_limit: int = 0
+    capture_backend: str = ""
+    jpeg_backend: str = ""
+    turbojpeg_lib_path: str = ""
+    jpeg_optimize: bool = False
+    delta_mode: str = ""
+    tile_size: int = 0
+    full_frame_interval: int = 0
 
     def record(
         self,
@@ -93,6 +113,15 @@ class ServerProfile:
         quality: int,
         scale: float,
         fps_limit: int,
+        capture_backend: str,
+        jpeg_backend: str,
+        jpeg_optimize: bool,
+        turbojpeg_lib_path: str | None,
+        delta_mode: str,
+        tile_size: int,
+        full_frame_interval: int,
+        changed_tiles: int,
+        total_tiles: int,
     ) -> None:
         self.frame_count += 1
         self.bytes_sent += payload_size
@@ -102,6 +131,8 @@ class ServerProfile:
         self.send_ms.append(send_ms)
         self.frame_total_ms.append(frame_total_ms)
         self.payload_bytes.append(float(payload_size))
+        self.changed_tiles.append(float(changed_tiles))
+        self.total_tiles.append(float(total_tiles))
         self.image_width = image_width
         self.image_height = image_height
         self.screen_width = state.width
@@ -109,6 +140,13 @@ class ServerProfile:
         self.quality = quality
         self.scale = scale
         self.fps_limit = fps_limit
+        self.capture_backend = capture_backend
+        self.jpeg_backend = jpeg_backend
+        self.turbojpeg_lib_path = turbojpeg_lib_path or ""
+        self.jpeg_optimize = jpeg_optimize
+        self.delta_mode = delta_mode
+        self.tile_size = tile_size
+        self.full_frame_interval = full_frame_interval
 
     def write(self) -> None:
         elapsed = max(0.001, time.time() - self.started_wall)
@@ -128,7 +166,16 @@ class ServerProfile:
                     "quality": self.quality,
                     "scale": self.scale,
                     "fps_limit": self.fps_limit,
+                    "capture_backend": self.capture_backend,
+                    "jpeg_backend": self.jpeg_backend,
+                    "turbojpeg_lib_path": self.turbojpeg_lib_path,
+                    "jpeg_optimize": self.jpeg_optimize,
+                    "delta_mode": self.delta_mode,
+                    "tile_size": self.tile_size,
+                    "full_frame_interval": self.full_frame_interval,
                 },
+                "changed_tiles": summarize(self.changed_tiles),
+                "total_tiles": summarize(self.total_tiles),
                 "payload_bytes": summarize(self.payload_bytes),
                 "capture_ms": summarize(self.capture_ms),
                 "convert_resize_ms": summarize(self.convert_resize_ms),
@@ -137,6 +184,105 @@ class ServerProfile:
                 "frame_total_ms": summarize(self.frame_total_ms),
             },
         )
+
+
+class CaptureBackend:
+    name = "base"
+
+    def get_state(self) -> CaptureState:
+        raise NotImplementedError
+
+    def grab(self) -> Image.Image:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+
+class MssCapture(CaptureBackend):
+    name = "mss"
+
+    def __init__(self) -> None:
+        import mss
+
+        self.screen = mss.mss()
+        monitor = self.screen.monitors[1]
+        self.monitor = {"left": monitor["left"], "top": monitor["top"], "width": monitor["width"], "height": monitor["height"]}
+        self.state = CaptureState(monitor["left"], monitor["top"], monitor["width"], monitor["height"])
+
+    def get_state(self) -> CaptureState:
+        return self.state
+
+    def grab(self) -> Image.Image:
+        shot = self.screen.grab(self.monitor)
+        return Image.frombytes("RGB", shot.size, shot.rgb)
+
+    def close(self) -> None:
+        self.screen.close()
+
+
+class DxcamCapture(CaptureBackend):
+    name = "dxcam"
+
+    def __init__(self) -> None:
+        import dxcam
+
+        self.camera = dxcam.create(output_idx=0, output_color="RGB")
+        frame = self.camera.grab()
+        if frame is None:
+            raise RuntimeError("dxcam did not return a frame")
+        height, width = frame.shape[:2]
+        self.state = CaptureState(0, 0, width, height)
+
+    def get_state(self) -> CaptureState:
+        return self.state
+
+    def grab(self) -> Image.Image:
+        frame = self.camera.grab()
+        if frame is None:
+            raise RuntimeError("dxcam did not return a frame")
+        return Image.fromarray(frame, "RGB")
+
+    def close(self) -> None:
+        try:
+            self.camera.stop()
+        except Exception:
+            pass
+        try:
+            self.camera.release()
+        except Exception:
+            pass
+
+
+class JpegEncoder:
+    name = "pillow"
+
+    def __init__(self, quality: int, optimize: bool) -> None:
+        self.quality = quality
+        self.optimize = optimize
+
+    def encode(self, image: Image.Image) -> bytes:
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=self.quality, optimize=self.optimize)
+        return output.getvalue()
+
+
+class TurboJpegEncoder(JpegEncoder):
+    name = "turbojpeg"
+
+    def __init__(self, quality: int, optimize: bool, lib_path: str | None) -> None:
+        super().__init__(quality, optimize)
+        try:
+            from turbojpeg import TurboJPEG
+        except ImportError as exc:
+            raise RuntimeError("turbojpeg package is not installed") from exc
+        self.jpeg = TurboJPEG(lib_path) if lib_path else TurboJPEG()
+
+    def encode(self, image: Image.Image) -> bytes:
+        # PyTurboJPEG accepts numpy arrays; import lazily so Pillow remains the default dependency.
+        import numpy
+
+        return self.jpeg.encode(numpy.asarray(image), quality=self.quality)
 
 
 class RemoteDesktopServer:
@@ -150,6 +296,13 @@ class RemoteDesktopServer:
         quality: int,
         scale: float,
         profile_output: str | None,
+        capture_backend: str,
+        jpeg_backend: str,
+        jpeg_optimize: bool,
+        turbojpeg_lib_path: str | None,
+        delta_mode: str,
+        tile_size: int,
+        full_frame_interval: int,
     ):
         self.name = name
         self.passcode = passcode
@@ -159,6 +312,13 @@ class RemoteDesktopServer:
         self.quality = max(35, min(quality, 95))
         self.scale = max(0.2, min(scale, 1.0))
         self.profile_output = profile_output
+        self.capture_backend_name = capture_backend
+        self.jpeg_backend_name = jpeg_backend
+        self.jpeg_optimize = jpeg_optimize
+        self.turbojpeg_lib_path = turbojpeg_lib_path
+        self.delta_mode = delta_mode
+        self.tile_size = max(64, min(tile_size, 1024))
+        self.full_frame_interval = max(1, full_frame_interval)
         self.stop_event = threading.Event()
 
     def start(self) -> None:
@@ -214,9 +374,9 @@ class RemoteDesktopServer:
 
             mss, pyautogui = import_capture_modules()
             pyautogui.FAILSAFE = False
-            with mss.mss() as screen:
-                monitor = screen.monitors[1]
-                state = CaptureState(monitor["left"], monitor["top"], monitor["width"], monitor["height"])
+            capture = create_capture_backend(self.capture_backend_name)
+            state = capture.get_state()
+            capture.close()
 
             send_packet(client, {"type": "auth", "ok": True, "screen_w": state.width, "screen_h": state.height})
             send_lock = threading.Lock()
@@ -254,39 +414,48 @@ class RemoteDesktopServer:
         state: CaptureState,
         profile: ServerProfile | None,
     ) -> None:
-        mss, _ = import_capture_modules()
         interval = 1.0 / self.fps
         frame = 0
-        with mss.mss() as screen:
-            monitor = {"left": state.left, "top": state.top, "width": state.width, "height": state.height}
+        capture = create_capture_backend(self.capture_backend_name)
+        encoder = create_jpeg_encoder(self.jpeg_backend_name, self.quality, self.jpeg_optimize, self.turbojpeg_lib_path)
+        previous: Image.Image | None = None
+        try:
             while alive.is_set():
                 started = time.perf_counter()
                 capture_started = time.perf_counter()
-                shot = screen.grab(monitor)
+                image = capture.grab()
                 captured = time.perf_counter()
-                image = Image.frombytes("RGB", shot.size, shot.rgb)
                 if self.scale != 1.0:
                     new_size = (max(1, int(image.width * self.scale)), max(1, int(image.height * self.scale)))
                     image = image.resize(new_size, Image.Resampling.BILINEAR)
                 converted = time.perf_counter()
-                output = io.BytesIO()
-                image.save(output, format="JPEG", quality=self.quality, optimize=True)
+                encoded_frame = encode_stream_frame(
+                    image=image,
+                    previous=previous,
+                    encoder=encoder,
+                    frame=frame,
+                    delta_mode=self.delta_mode,
+                    tile_size=self.tile_size,
+                    full_frame_interval=self.full_frame_interval,
+                )
                 encoded = time.perf_counter()
-                payload = output.getvalue()
+                previous = image.copy()
                 packet = {
                     "type": "frame",
                     "frame": frame,
                     "server_wall_ns": time.time_ns(),
                     "screen_w": state.width,
                     "screen_h": state.height,
-                    "image_w": image.width,
-                    "image_h": image.height,
+                    "image_w": encoded_frame.image_width,
+                    "image_h": encoded_frame.image_height,
                     "format": "jpeg",
+                    "mode": encoded_frame.mode,
+                    "tiles": encoded_frame.tiles,
                 }
                 try:
                     send_started = time.perf_counter()
                     with send_lock:
-                        send_packet(client, packet, payload)
+                        send_packet(client, packet, encoded_frame.payload)
                     sent = time.perf_counter()
                 except OSError:
                     alive.clear()
@@ -298,18 +467,29 @@ class RemoteDesktopServer:
                         encode_ms=(encoded - converted) * 1000.0,
                         send_ms=(sent - send_started) * 1000.0,
                         frame_total_ms=(sent - started) * 1000.0,
-                        payload_size=len(payload),
-                        image_width=image.width,
-                        image_height=image.height,
+                        payload_size=len(encoded_frame.payload),
+                        image_width=encoded_frame.image_width,
+                        image_height=encoded_frame.image_height,
                         state=state,
                         quality=self.quality,
                         scale=self.scale,
                         fps_limit=self.fps,
+                        capture_backend=capture.name,
+                        jpeg_backend=encoder.name,
+                        jpeg_optimize=self.jpeg_optimize,
+                        turbojpeg_lib_path=self.turbojpeg_lib_path,
+                        delta_mode=self.delta_mode,
+                        tile_size=self.tile_size,
+                        full_frame_interval=self.full_frame_interval,
+                        changed_tiles=encoded_frame.changed_tiles,
+                        total_tiles=encoded_frame.total_tiles,
                     )
                 frame += 1
                 elapsed = time.perf_counter() - started
                 if elapsed < interval:
                     time.sleep(interval - elapsed)
+        finally:
+            capture.close()
 
     def _input_loop(self, client: socket.socket, pyautogui: Any, alive: threading.Event, state: CaptureState) -> None:
         while alive.is_set():
@@ -338,6 +518,100 @@ class RemoteDesktopServer:
                         pyautogui.keyDown(key)
                     else:
                         pyautogui.keyUp(key)
+
+
+def create_capture_backend(name: str) -> CaptureBackend:
+    if name == "mss":
+        return MssCapture()
+    if name == "dxcam":
+        return DxcamCapture()
+    if name == "auto":
+        try:
+            return DxcamCapture()
+        except Exception:
+            return MssCapture()
+    raise ValueError(f"unknown capture backend: {name}")
+
+
+def create_jpeg_encoder(name: str, quality: int, optimize: bool, turbojpeg_lib_path: str | None) -> JpegEncoder:
+    if name == "pillow":
+        return JpegEncoder(quality, optimize)
+    if name == "turbojpeg":
+        return TurboJpegEncoder(quality, optimize, turbojpeg_lib_path)
+    if name == "auto":
+        try:
+            return TurboJpegEncoder(quality, optimize, turbojpeg_lib_path)
+        except Exception:
+            return JpegEncoder(quality, optimize)
+    raise ValueError(f"unknown JPEG backend: {name}")
+
+
+def encode_stream_frame(
+    *,
+    image: Image.Image,
+    previous: Image.Image | None,
+    encoder: JpegEncoder,
+    frame: int,
+    delta_mode: str,
+    tile_size: int,
+    full_frame_interval: int,
+) -> EncodedFrame:
+    if delta_mode == "off" or previous is None or frame % full_frame_interval == 0:
+        return EncodedFrame(
+            mode="full",
+            payload=encoder.encode(image),
+            tiles=[],
+            changed_tiles=1,
+            total_tiles=1,
+            image_width=image.width,
+            image_height=image.height,
+        )
+    if previous.size != image.size:
+        return EncodedFrame(
+            mode="full",
+            payload=encoder.encode(image),
+            tiles=[],
+            changed_tiles=1,
+            total_tiles=1,
+            image_width=image.width,
+            image_height=image.height,
+        )
+    return encode_delta_frame(image, previous, encoder, tile_size)
+
+
+def encode_delta_frame(image: Image.Image, previous: Image.Image, encoder: JpegEncoder, tile_size: int) -> EncodedFrame:
+    payload_parts: list[bytes] = []
+    tiles: list[dict[str, int]] = []
+    total_tiles = 0
+    width, height = image.size
+    for y in range(0, height, tile_size):
+        for x in range(0, width, tile_size):
+            total_tiles += 1
+            box = (x, y, min(x + tile_size, width), min(y + tile_size, height))
+            current_tile = image.crop(box)
+            previous_tile = previous.crop(box)
+            if not ImageChops.difference(current_tile, previous_tile).getbbox():
+                continue
+            encoded = encoder.encode(current_tile)
+            payload_parts.append(encoded)
+            tiles.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "w": box[2] - box[0],
+                    "h": box[3] - box[1],
+                    "size": len(encoded),
+                }
+            )
+    return EncodedFrame(
+        mode="delta",
+        payload=b"".join(payload_parts),
+        tiles=tiles,
+        changed_tiles=len(tiles),
+        total_tiles=total_tiles,
+        image_width=width,
+        image_height=height,
+    )
 
 
 def normalize_key(message: dict[str, Any]) -> str | None:
@@ -371,6 +645,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quality", type=int, default=70, help="JPEG quality 35-95")
     parser.add_argument("--scale", type=float, default=0.75, help="Stream scale 0.2-1.0")
     parser.add_argument("--profile-output", default=None, help="Write server-side profiling JSON after a client disconnects")
+    parser.add_argument("--capture-backend", choices=["mss", "dxcam", "auto"], default="mss", help="Screen capture backend")
+    parser.add_argument("--jpeg-backend", choices=["pillow", "turbojpeg", "auto"], default="pillow", help="JPEG encoder backend")
+    parser.add_argument("--jpeg-optimize", action=argparse.BooleanOptionalAction, default=False, help="Enable Pillow JPEG optimize")
+    parser.add_argument("--turbojpeg-lib-path", default=None, help="Path to the native turbojpeg DLL when using PyTurboJPEG")
+    parser.add_argument("--delta-mode", choices=["off", "tiles"], default="off", help="Send changed JPEG tiles after full frames")
+    parser.add_argument("--tile-size", type=int, default=384, help="Delta tile size in pixels")
+    parser.add_argument("--full-frame-interval", type=int, default=90, help="Send a full frame every N frames in delta mode")
     return parser.parse_args()
 
 
@@ -386,6 +667,13 @@ def main() -> None:
         args.quality,
         args.scale,
         args.profile_output,
+        args.capture_backend,
+        args.jpeg_backend,
+        args.jpeg_optimize,
+        args.turbojpeg_lib_path,
+        args.delta_mode,
+        args.tile_size,
+        args.full_frame_interval,
     ).start()
 
 

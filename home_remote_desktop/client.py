@@ -3,12 +3,16 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import queue
 import socket
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass, field
+from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
@@ -129,6 +133,7 @@ class RemoteDesktopClient(tk.Tk):
         self.send_lock = threading.Lock()
         self.frame_queue: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2)
         self.current_photo: ImageTk.PhotoImage | None = None
+        self.desktop_image: Image.Image | None = None
         self.image_size = (1, 1)
         self.screen_size = (1, 1)
         self.connected = False
@@ -283,7 +288,8 @@ class RemoteDesktopClient(tk.Tk):
         if latest:
             header, payload = latest
             self.screen_size = (int(header["screen_w"]), int(header["screen_h"]))
-            image = Image.open(io.BytesIO(payload))
+            image = apply_frame_payload(header, payload, self.desktop_image)
+            self.desktop_image = image
             self.image_size = image.size
             self._show_image(image)
         self.after(33, self._drain_frames)
@@ -365,12 +371,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--passcode", default=None, help="Server passcode")
     parser.add_argument("--profile-seconds", type=float, default=0.0, help="Run headless receive/decode profiling for N seconds")
     parser.add_argument("--profile-output", default="client-profile.json", help="Profiling JSON output path")
+    parser.add_argument("--profile-config-sweep", action="store_true", help="Run local server/client profiling across candidate configs")
+    parser.add_argument("--profile-config-output", default="profile-recommendation.json", help="Config sweep recommendation JSON path")
+    parser.add_argument("--profile-config-dir", default="profile-config-results", help="Directory for per-config profiler JSON/logs")
+    parser.add_argument("--profile-config-seconds", type=float, default=6.0, help="Seconds to profile each config")
     return parser.parse_args()
 
 
 def run_profile(host: str, port: int, passcode: str, seconds: float, output_path: str) -> None:
     profile = ClientProfile(host=host, port=port, seconds=seconds, output_path=output_path)
     sock = socket.create_connection((host, port), timeout=8)
+    desktop_image: Image.Image | None = None
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         send_packet(sock, {"type": "hello", "passcode": passcode, "client": socket.gethostname(), "profile": True})
@@ -386,8 +397,7 @@ def run_profile(host: str, port: int, passcode: str, seconds: float, output_path
             if header.get("type") != "frame":
                 continue
             decode_started = time.perf_counter()
-            image = Image.open(io.BytesIO(payload))
-            image.load()
+            desktop_image = apply_frame_payload(header, payload, desktop_image)
             decoded = time.perf_counter()
             profile.record(
                 header=header,
@@ -405,8 +415,204 @@ def run_profile(host: str, port: int, passcode: str, seconds: float, output_path
         profile.write()
 
 
+def apply_frame_payload(header: dict[str, Any], payload: bytes, previous: Image.Image | None) -> Image.Image:
+    mode = header.get("mode", "full")
+    if mode == "full":
+        image = Image.open(io.BytesIO(payload))
+        image.load()
+        return image.convert("RGB")
+
+    width = int(header.get("image_w", 1))
+    height = int(header.get("image_h", 1))
+    if previous is None or previous.size != (width, height):
+        base = Image.new("RGB", (width, height))
+    else:
+        base = previous.copy()
+
+    offset = 0
+    for tile in header.get("tiles", []):
+        size = int(tile["size"])
+        tile_payload = payload[offset : offset + size]
+        offset += size
+        tile_image = Image.open(io.BytesIO(tile_payload))
+        tile_image.load()
+        base.paste(tile_image.convert("RGB"), (int(tile["x"]), int(tile["y"])))
+    return base
+
+
+def candidate_configs() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "balanced-full",
+            "server_args": ["--fps", "20", "--quality", "70", "--scale", "0.75", "--delta-mode", "off", "--no-jpeg-optimize"],
+        },
+        {
+            "name": "balanced-full-optimized-jpeg",
+            "server_args": ["--fps", "20", "--quality", "70", "--scale", "0.75", "--delta-mode", "off", "--jpeg-optimize"],
+        },
+        {
+            "name": "fast-full",
+            "server_args": ["--fps", "20", "--quality", "60", "--scale", "0.5", "--delta-mode", "off", "--no-jpeg-optimize"],
+        },
+        {
+            "name": "fast-delta",
+            "server_args": [
+                "--fps",
+                "20",
+                "--quality",
+                "60",
+                "--scale",
+                "0.5",
+                "--delta-mode",
+                "tiles",
+                "--tile-size",
+                "384",
+                "--full-frame-interval",
+                "90",
+                "--no-jpeg-optimize",
+            ],
+        },
+        {
+            "name": "auto-backends-delta",
+            "server_args": [
+                "--fps",
+                "20",
+                "--quality",
+                "60",
+                "--scale",
+                "0.5",
+                "--capture-backend",
+                "auto",
+                "--jpeg-backend",
+                "auto",
+                "--delta-mode",
+                "tiles",
+                "--tile-size",
+                "384",
+                "--full-frame-interval",
+                "90",
+                "--no-jpeg-optimize",
+            ],
+        },
+    ]
+
+
+def run_config_sweep(output_path: str, result_dir: str, seconds: float) -> None:
+    result_root = Path(result_dir)
+    result_root.mkdir(parents=True, exist_ok=True)
+    passcode = "123456"
+    base_port = 51600
+    results: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidate_configs()):
+        port = base_port + index
+        name = candidate["name"]
+        server_profile = result_root / f"{name}-server.json"
+        client_profile = result_root / f"{name}-client.json"
+        server_out = result_root / f"{name}-server.out.log"
+        server_err = result_root / f"{name}-server.err.log"
+        for path in (server_profile, client_profile, server_out, server_err):
+            if path.exists():
+                path.unlink()
+        server_args = [
+            sys.executable,
+            "-m",
+            "home_remote_desktop.server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--passcode",
+            passcode,
+            "--profile-output",
+            str(server_profile),
+            *candidate["server_args"],
+        ]
+        with open(server_out, "w", encoding="utf-8") as out, open(server_err, "w", encoding="utf-8") as err:
+            process = subprocess.Popen(server_args, stdout=out, stderr=err)
+        try:
+            wait_for_port("127.0.0.1", port, timeout=8.0)
+            run_profile("127.0.0.1", port, passcode, seconds, str(client_profile))
+            time.sleep(1.0)
+        except Exception as exc:
+            results.append({"name": name, "ok": False, "error": str(exc), "server_args": candidate["server_args"]})
+            continue
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2.0)
+
+        if not server_profile.exists() or not client_profile.exists():
+            results.append({"name": name, "ok": False, "error": "profile output was not created", "server_args": candidate["server_args"]})
+            continue
+        server_data = json.loads(server_profile.read_text(encoding="utf-8"))
+        client_data = json.loads(client_profile.read_text(encoding="utf-8"))
+        score = config_score(server_data, client_data)
+        results.append(
+            {
+                "name": name,
+                "ok": True,
+                "score": score,
+                "server_args": candidate["server_args"],
+                "server_profile": str(server_profile),
+                "client_profile": str(client_profile),
+                "fps": client_data["fps"],
+                "mbps": client_data["mbps"],
+                "decode_ms_avg": client_data["decode_ms"]["avg"],
+                "server_frame_ms_avg": server_data["frame_total_ms"]["avg"],
+                "server_stream": server_data["stream"],
+            }
+        )
+
+    successful = [result for result in results if result.get("ok")]
+    best = max(successful, key=lambda item: item["score"]) if successful else None
+    recommendation = {
+        "role": "configuration-recommendation",
+        "results": results,
+        "recommended": None,
+    }
+    if best:
+        server_flags = " ".join(best["server_args"])
+        recommendation["recommended"] = {
+            "name": best["name"],
+            "score": best["score"],
+            "server_command": f".\\run-server.bat --passcode 123456 {server_flags}",
+            "client_command": ".\\run-client.bat",
+            "profile_command": ".\\run-client.bat --host 127.0.0.1 --passcode 123456 --profile-seconds 10 --profile-output client-profile.json",
+            "why": "Chosen by a local score that favors higher FPS and lower bandwidth/decode cost.",
+        }
+    write_json(output_path, recommendation)
+
+
+def wait_for_port(host: str, port: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.1)
+    raise TimeoutError(f"server did not listen on {host}:{port}: {last_error}")
+
+
+def config_score(server_data: dict[str, Any], client_data: dict[str, Any]) -> float:
+    fps = float(client_data.get("fps", 0.0))
+    mbps = float(client_data.get("mbps", 0.0))
+    decode_ms = float(client_data.get("decode_ms", {}).get("avg", 0.0))
+    frame_ms = float(server_data.get("frame_total_ms", {}).get("avg", 0.0))
+    return fps - (mbps * 0.03) - (decode_ms * 0.01) - (frame_ms * 0.002)
+
+
 def main() -> None:
     args = parse_args()
+    if args.profile_config_sweep:
+        run_config_sweep(args.profile_config_output, args.profile_config_dir, args.profile_config_seconds)
+        return
     if args.profile_seconds > 0:
         if not args.host or not args.passcode:
             raise SystemExit("--profile-seconds requires --host and --passcode")

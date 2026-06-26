@@ -1,0 +1,5 @@
+-r requirements.txt
+dxcam>=0.0.5
+numpy>=1.26
+opencv-python>=4.9
+PyTurboJPEG>=1.7
