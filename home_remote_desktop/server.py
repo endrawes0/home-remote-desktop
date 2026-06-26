@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import io
 import json
 import os
@@ -429,6 +430,7 @@ class RemoteDesktopServer:
     def _handle_client(self, client: socket.socket, addr: tuple[str, int]) -> None:
         alive: threading.Event | None = None
         stream: threading.Thread | None = None
+        focus: threading.Thread | None = None
         profile: ServerProfile | None = None
         try:
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -461,6 +463,12 @@ class RemoteDesktopServer:
                 daemon=True,
             )
             stream.start()
+            focus = threading.Thread(
+                target=self._keyboard_focus_loop,
+                args=(client, send_lock, alive),
+                daemon=True,
+            )
+            focus.start()
             self._input_loop(client, pyautogui, alive, state, config_state)
         except (ConnectionError, OSError):
             print(f"Client {addr[0]} disconnected", flush=True)
@@ -475,6 +483,8 @@ class RemoteDesktopServer:
                 pass
             if stream:
                 stream.join(timeout=2.0)
+            if focus:
+                focus.join(timeout=1.0)
             if profile:
                 profile.write()
                 print(f"Wrote server profile to {profile.output_path}")
@@ -630,6 +640,130 @@ class RemoteDesktopServer:
                         pyautogui.keyDown(key)
                     else:
                         pyautogui.keyUp(key)
+
+    def _keyboard_focus_loop(
+        self,
+        client: socket.socket,
+        send_lock: threading.Lock,
+        alive: threading.Event,
+    ) -> None:
+        detector = WindowsTextFocusDetector()
+        last_editable: bool | None = None
+        while alive.is_set():
+            editable = detector.is_text_entry_focused()
+            if editable != last_editable:
+                packet = {
+                    "type": "ime",
+                    "action": "show" if editable else "hide",
+                    "text_entry_focused": editable,
+                }
+                try:
+                    with send_lock:
+                        send_packet(client, packet)
+                except OSError:
+                    alive.clear()
+                    return
+                last_editable = editable
+            time.sleep(0.25)
+
+
+class WindowsTextFocusDetector:
+    EDITABLE_CLASS_PARTS = (
+        "edit",
+        "richedit",
+        "text",
+        "textbox",
+        "scintilla",
+        "consolewindowclass",
+    )
+
+    def __init__(self) -> None:
+        self.uia: Any | None = None
+        self.uia_defs: Any | None = None
+        try:
+            import comtypes.client
+
+            comtypes.client.GetModule("UIAutomationCore.dll")
+            from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+            from comtypes.gen import UIAutomationClient as uia_defs
+
+            self.uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+            self.uia_defs = uia_defs
+        except Exception:
+            self.uia = None
+            self.uia_defs = None
+
+    def is_text_entry_focused(self) -> bool:
+        uia_result = self._uia_text_entry_focused()
+        if uia_result is not None:
+            return uia_result
+        return self._focused_class_is_editable()
+
+    def _uia_text_entry_focused(self) -> bool | None:
+        if self.uia is None or self.uia_defs is None:
+            return None
+        try:
+            element = self.uia.GetFocusedElement()
+            if not element or not bool(element.CurrentIsEnabled):
+                return False
+            control_type = int(element.CurrentControlType)
+            class_name = str(element.CurrentClassName or "").lower()
+            defs = self.uia_defs
+            if control_type in {
+                defs.UIA_EditControlTypeId,
+                defs.UIA_DocumentControlTypeId,
+                defs.UIA_ComboBoxControlTypeId,
+            }:
+                return True
+            value_available = bool(element.GetCurrentPropertyValue(defs.UIA_IsValuePatternAvailablePropertyId))
+            text_available = bool(element.GetCurrentPropertyValue(defs.UIA_IsTextPatternAvailablePropertyId))
+            if value_available and any(part in class_name for part in self.EDITABLE_CLASS_PARTS):
+                return True
+            if text_available and any(part in class_name for part in self.EDITABLE_CLASS_PARTS):
+                return True
+            return False
+        except Exception:
+            return None
+
+    def _focused_class_is_editable(self) -> bool:
+        hwnd = focused_control_hwnd()
+        if not hwnd:
+            return False
+        class_name = window_class_name(hwnd).lower()
+        return any(part in class_name for part in self.EDITABLE_CLASS_PARTS)
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("flags", ctypes.c_uint),
+        ("hwndActive", ctypes.c_void_p),
+        ("hwndFocus", ctypes.c_void_p),
+        ("hwndCapture", ctypes.c_void_p),
+        ("hwndMenuOwner", ctypes.c_void_p),
+        ("hwndMoveSize", ctypes.c_void_p),
+        ("hwndCaret", ctypes.c_void_p),
+        ("rcCaret", ctypes.c_long * 4),
+    ]
+
+
+def focused_control_hwnd() -> int:
+    user32 = ctypes.windll.user32
+    foreground = user32.GetForegroundWindow()
+    if not foreground:
+        return 0
+    thread_id = user32.GetWindowThreadProcessId(ctypes.c_void_p(foreground), None)
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
+        return int(info.hwndFocus or foreground)
+    return int(foreground)
+
+
+def window_class_name(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(ctypes.c_void_p(hwnd), buffer, len(buffer))
+    return buffer.value
 
 
 def create_capture_backend(name: str) -> CaptureBackend:

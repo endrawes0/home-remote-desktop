@@ -1,6 +1,7 @@
 package com.example.homeremotedesktop;
 
 import android.app.Activity;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -10,9 +11,14 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -51,6 +57,7 @@ public class MainActivity extends Activity {
     private EditText portField;
     private EditText passcodeField;
     private EditText textField;
+    private EditText keyboardSink;
     private TextView statusView;
     private LinearLayout controls;
     private Button connectButton;
@@ -167,6 +174,55 @@ public class MainActivity extends Activity {
         statusView.setText("Ready");
         controls.addView(statusView);
 
+        keyboardSink = new EditText(this);
+        keyboardSink.setSingleLine(true);
+        keyboardSink.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        keyboardSink.setImeOptions(EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        keyboardSink.setAlpha(0.01f);
+        keyboardSink.setMinWidth(1);
+        keyboardSink.setMinHeight(1);
+        keyboardSink.setPadding(0, 0, 0, 0);
+        keyboardSink.addTextChangedListener(new TextWatcher() {
+            private boolean clearing;
+
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable editable) {
+                if (clearing || editable.length() == 0) {
+                    return;
+                }
+                sendKeyboardText(editable.toString());
+                clearing = true;
+                editable.clear();
+                clearing = false;
+            }
+        });
+        keyboardSink.setOnEditorActionListener((view, actionId, event) -> {
+            sendPress("Return");
+            return true;
+        });
+        keyboardSink.setOnKeyListener((view, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) {
+                return false;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DEL) {
+                sendPress("BackSpace");
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_ENTER) {
+                sendPress("Return");
+                return true;
+            }
+            return false;
+        });
+
         desktopView = new DesktopView(this);
         desktopView.setInputSender(message -> {
             RemoteConnection active = connection;
@@ -177,6 +233,7 @@ public class MainActivity extends Activity {
         desktopView.setFullscreenToggle(() -> setFullscreen(!fullscreen));
 
         root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(keyboardSink, new LinearLayout.LayoutParams(1, 1));
         root.addView(desktopView, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
     }
@@ -321,6 +378,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void sendKeyboardText(String text) {
+        RemoteConnection active = connection;
+        if (active == null || text.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", "text");
+            message.put("text", text);
+            active.sendInput(message);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void sendPress(String keysym) {
         RemoteConnection active = connection;
         if (active == null) {
@@ -361,6 +432,24 @@ public class MainActivity extends Activity {
 
     private void showToast(String message) {
         runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
+    }
+
+    private void handleIme(JSONObject message) {
+        String action = message.optString("action", "hide");
+        runOnUiThread(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) {
+                return;
+            }
+            if ("show".equals(action)) {
+                keyboardSink.requestFocus();
+                imm.showSoftInput(keyboardSink, InputMethodManager.SHOW_IMPLICIT);
+            } else {
+                keyboardSink.clearFocus();
+                imm.hideSoftInputFromWindow(keyboardSink.getWindowToken(), 0);
+                desktopView.requestFocus();
+            }
+        });
     }
 
     private static final class ServerInfo {
@@ -414,7 +503,12 @@ public class MainActivity extends Activity {
                 setStatus("Connected to " + host + ":" + port);
                 while (running) {
                     Packet packet = readPacket(input);
-                    if (!"frame".equals(packet.header.optString("type"))) {
+                    String type = packet.header.optString("type");
+                    if ("ime".equals(type)) {
+                        handleIme(packet.header);
+                        continue;
+                    }
+                    if (!"frame".equals(type)) {
                         continue;
                     }
                     Bitmap frame = applyFrame(packet.header, packet.payload);
