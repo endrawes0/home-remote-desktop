@@ -341,7 +341,7 @@ class RemoteDesktopClient(tk.Tk):
             self.passcode = simpledialog.askstring("Passcode", f"Passcode for {self.host}:", show="*")
             if not self.passcode:
                 return
-        self.disconnect()
+        self.disconnect(status=None)
         self.status_var.set(f"Connecting to {self.host}:{self.port}...")
         threading.Thread(target=self._connect_worker, daemon=True).start()
 
@@ -395,7 +395,7 @@ class RemoteDesktopClient(tk.Tk):
         except (ConnectionError, OSError):
             if self.connected and self.sock is sock:
                 self.connected = False
-                self.after(0, lambda: self.status_var.set("Disconnected"))
+                self._set_status("Disconnected: connection closed")
 
     def _drain_frames(self) -> None:
         latest: tuple[dict[str, Any], bytes] | None = None
@@ -450,7 +450,7 @@ class RemoteDesktopClient(tk.Tk):
                 print(f"input {message}", flush=True)
         except OSError:
             if self.connected:
-                self.disconnect()
+                self.disconnect(status="Disconnected: input send failed")
 
     def _queue_mouse_move(self, point: tuple[float, float]) -> None:
         self.pending_move = point
@@ -543,7 +543,10 @@ class RemoteDesktopClient(tk.Tk):
             return "break"
         return None
 
-    def disconnect(self) -> None:
+    def _set_status(self, status: str) -> None:
+        self.after(0, lambda: self.status_var.set(status))
+
+    def disconnect(self, status: str | None = "Disconnected") -> None:
         self.connected = False
         if self.move_flush_after is not None:
             self.after_cancel(self.move_flush_after)
@@ -560,6 +563,8 @@ class RemoteDesktopClient(tk.Tk):
                 sock.close()
             except OSError:
                 pass
+        if status:
+            self._set_status(status)
 
 
 def parse_args() -> argparse.Namespace:
