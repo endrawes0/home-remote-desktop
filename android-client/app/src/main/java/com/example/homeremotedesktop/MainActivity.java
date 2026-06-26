@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
     private Button connectButton;
     private Button fullscreenButton;
     private DesktopView desktopView;
-    private RemoteConnection connection;
+    private volatile RemoteConnection connection;
     private boolean fullscreen;
 
     @Override
@@ -470,8 +470,8 @@ public class MainActivity extends Activity {
         private final String passcode;
         private final Object sendLock = new Object();
         private volatile boolean running = true;
-        private Socket socket;
-        private OutputStream output;
+        private volatile Socket socket;
+        private volatile OutputStream output;
         private Bitmap desktopBitmap;
 
         RemoteConnection(String host, int port, String passcode) {
@@ -648,6 +648,9 @@ public class MainActivity extends Activity {
         public DesktopView(Activity activity) {
             super(activity);
             setBackgroundColor(Color.rgb(12, 12, 12));
+            setClickable(true);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
             dragThreshold = 12f * getResources().getDisplayMetrics().density;
         }
 
@@ -699,15 +702,13 @@ public class MainActivity extends Activity {
             if (inputSender == null || drawRect.isEmpty()) {
                 return true;
             }
-            float x = event.getX();
-            float y = event.getY();
-            if (!drawRect.contains(x, y)) {
-                return true;
-            }
+            float x = clamp(event.getX(), drawRect.left, drawRect.right);
+            float y = clamp(event.getY(), drawRect.top, drawRect.bottom);
             float nx = (x - drawRect.left) / drawRect.width();
             float ny = (y - drawRect.top) / drawRect.height();
             try {
                 if (action == MotionEvent.ACTION_DOWN) {
+                    requestFocus();
                     dragging = false;
                     downX = x;
                     downY = y;
@@ -738,6 +739,12 @@ public class MainActivity extends Activity {
             return true;
         }
 
+        @Override
+        public boolean performClick() {
+            super.performClick();
+            return true;
+        }
+
         private void sendPointer(String event, float nx, float ny) throws Exception {
             JSONObject message = new JSONObject();
             message.put("event", event);
@@ -753,6 +760,16 @@ public class MainActivity extends Activity {
             }
             if (value > 1f) {
                 return 1f;
+            }
+            return value;
+        }
+
+        private static float clamp(float value, float min, float max) {
+            if (value < min) {
+                return min;
+            }
+            if (value > max) {
+                return max;
             }
             return value;
         }
