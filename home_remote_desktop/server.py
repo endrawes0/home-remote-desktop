@@ -262,6 +262,7 @@ class DxcamCapture(CaptureBackend):
         frame = self.camera.grab()
         if frame is None:
             raise RuntimeError("dxcam did not return a frame")
+        self.last_frame = frame
         height, width = frame.shape[:2]
         self.state = CaptureState(0, 0, width, height)
 
@@ -271,7 +272,9 @@ class DxcamCapture(CaptureBackend):
     def grab(self) -> Image.Image:
         frame = self.camera.grab()
         if frame is None:
-            raise RuntimeError("dxcam did not return a frame")
+            frame = self.last_frame
+        else:
+            self.last_frame = frame
         return Image.fromarray(frame, "RGB")
 
     def close(self) -> None:
@@ -308,6 +311,8 @@ class TurboJpegEncoder(JpegEncoder):
         except ImportError as exc:
             raise RuntimeError("turbojpeg package is not installed") from exc
         resolved_lib_path = lib_path or find_turbojpeg_library()
+        if resolved_lib_path and hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(os.path.dirname(resolved_lib_path))
         self.jpeg = TurboJPEG(resolved_lib_path) if resolved_lib_path else TurboJPEG()
 
     def encode(self, image: Image.Image) -> bytes:
@@ -529,6 +534,8 @@ class RemoteDesktopServer:
                     "server_frame_ms": (encoded - started) * 1000.0,
                     "changed_tiles": encoded_frame.changed_tiles,
                     "total_tiles": encoded_frame.total_tiles,
+                    "capture_backend": capture.name,
+                    "jpeg_backend": encoder.name,
                 }
                 try:
                     send_started = time.perf_counter()

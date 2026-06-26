@@ -45,6 +45,7 @@ Optional performance backends:
 ```
 
 This installs Python performance packages and attempts to install the Visual C++ libjpeg-turbo package with winget: `libjpeg-turbo.libjpeg-turbo.VC`.
+The installer requests the libjpeg-turbo architecture that matches the Python executable, which matters on Windows on Arm when Python may be x64.
 
 TurboJPEG also requires the native libjpeg-turbo DLL. If it is not discoverable automatically, pass it explicitly:
 

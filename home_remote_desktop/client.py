@@ -137,6 +137,8 @@ class PairProfile:
     server_frame_ms: list[float] = field(default_factory=list)
     changed_tiles: list[float] = field(default_factory=list)
     total_tiles: list[float] = field(default_factory=list)
+    capture_backend: str = ""
+    jpeg_backend: str = ""
     first_frame_wall: float | None = None
     last_frame_wall: float | None = None
     stream: dict[str, int] = field(default_factory=dict)
@@ -156,6 +158,8 @@ class PairProfile:
             "width": int(header.get("image_w", 0)),
             "height": int(header.get("image_h", 0)),
         }
+        self.capture_backend = str(header.get("capture_backend") or self.capture_backend)
+        self.jpeg_backend = str(header.get("jpeg_backend") or self.jpeg_backend)
         server_wall_ns = int(header.get("server_wall_ns") or 0)
         if server_wall_ns:
             self.end_to_end_ms.append((received_wall_ns - server_wall_ns) / 1_000_000.0)
@@ -188,6 +192,8 @@ class PairProfile:
             "stream": self.stream,
         }
         server_data = {
+            "capture_backend": self.capture_backend,
+            "jpeg_backend": self.jpeg_backend,
             "capture_ms": summarize(self.server_capture_ms),
             "convert_resize_ms": summarize(self.server_convert_resize_ms),
             "encode_ms": summarize(self.server_encode_ms),
@@ -627,6 +633,28 @@ def pair_candidate_configs() -> list[dict[str, Any]]:
             "quality": 60,
             "scale": 0.5,
             "jpeg_backend": "pillow",
+            "jpeg_optimize": False,
+            "delta_mode": "tiles",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "turbojpeg-full",
+            "fps": 20,
+            "quality": 60,
+            "scale": 0.5,
+            "jpeg_backend": "turbojpeg",
+            "jpeg_optimize": False,
+            "delta_mode": "off",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "turbojpeg-delta",
+            "fps": 20,
+            "quality": 60,
+            "scale": 0.5,
+            "jpeg_backend": "turbojpeg",
             "jpeg_optimize": False,
             "delta_mode": "tiles",
             "tile_size": 384,

@@ -24,6 +24,9 @@ exit /b 0
 call "%~dp0hrd-python.cmd" -m pip install -r requirements-performance.txt
 if errorlevel 1 exit /b %errorlevel%
 
+set "PY_ARCH=x64"
+for /f "usebackq delims=" %%A in (`call "%~dp0hrd-python.cmd" -m home_remote_desktop.install_helpers python-arch`) do set "PY_ARCH=%%A"
+
 where winget >nul 2>nul
 if errorlevel 1 (
   echo.
@@ -33,8 +36,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo Installing libjpeg-turbo native DLL with winget...
-winget install --id libjpeg-turbo.libjpeg-turbo.VC -e --accept-source-agreements --accept-package-agreements
+echo Installing libjpeg-turbo native DLL for Python architecture %PY_ARCH% with winget...
+winget install --id libjpeg-turbo.libjpeg-turbo.VC -e --architecture %PY_ARCH% --accept-source-agreements --accept-package-agreements
 if errorlevel 1 (
   echo.
   echo libjpeg-turbo installation did not complete. The app will still run with Pillow JPEG.
