@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-remote-desktop"
+version = "0.1.0"
+description = "Small LAN remote desktop client/server for Windows 11 home networks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10.0",
+  "mss>=9.0",
+  "pyautogui>=0.9.54",
+]
+
+[project.scripts]
+hrd-server = "home_remote_desktop.server:main"
+hrd-client = "home_remote_desktop.client:main"
+
+[tool.setuptools.packages.find]
+include = ["home_remote_desktop*"]
+
