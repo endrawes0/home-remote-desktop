@@ -49,6 +49,12 @@ KEY_MAP = {
     "Shift_R": "shift",
     "Alt_L": "alt",
     "Alt_R": "alt",
+    "Super_L": "win",
+    "Super_R": "win",
+    "Meta_L": "win",
+    "Meta_R": "win",
+    "Win_L": "win",
+    "Win_R": "win",
 }
 
 

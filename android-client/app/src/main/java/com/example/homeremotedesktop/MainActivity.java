@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -23,6 +24,8 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -64,9 +67,16 @@ public class MainActivity extends Activity {
     private LinearLayout controls;
     private Button connectButton;
     private Button fullscreenButton;
+    private LinearLayout specialKeysBar;
+    private Button ctrlButton;
+    private Button altButton;
+    private Button shiftButton;
     private DesktopView desktopView;
     private volatile RemoteConnection connection;
     private boolean fullscreen;
+    private boolean ctrlHeld;
+    private boolean altHeld;
+    private boolean shiftHeld;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -234,10 +244,74 @@ public class MainActivity extends Activity {
         });
         desktopView.setFullscreenToggle(() -> setFullscreen(!fullscreen));
 
+        FrameLayout desktopContainer = new FrameLayout(this);
+        desktopContainer.addView(desktopView, new FrameLayout.LayoutParams(-1, -1));
+        specialKeysBar = buildSpecialKeysBar();
+        FrameLayout.LayoutParams specialKeysParams = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        desktopContainer.addView(specialKeysBar, specialKeysParams);
+        specialKeysBar.setVisibility(View.GONE);
+
         root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
         root.addView(keyboardSink, new LinearLayout.LayoutParams(1, 1));
-        root.addView(desktopView, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(desktopContainer, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
+    }
+
+    private LinearLayout buildSpecialKeysBar() {
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(false);
+        scroll.setBackgroundColor(Color.argb(210, 20, 20, 20));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(8, 6, 8, 6);
+        scroll.addView(row, new HorizontalScrollView.LayoutParams(-2, -2));
+
+        Button winButton = addSpecialButton(row, "Win", 64);
+        winButton.setOnClickListener(v -> sendPress("Super_L"));
+        ctrlButton = addSpecialButton(row, "Ctrl", 64);
+        ctrlButton.setOnClickListener(v -> toggleModifier("Control_L"));
+        altButton = addSpecialButton(row, "Alt", 64);
+        altButton.setOnClickListener(v -> toggleModifier("Alt_L"));
+        shiftButton = addSpecialButton(row, "Shift", 74);
+        shiftButton.setOnClickListener(v -> toggleModifier("Shift_L"));
+
+        addPressButton(row, "Esc", "Escape", 62);
+        addPressButton(row, "Tab", "Tab", 62);
+        addPressButton(row, "Enter", "Return", 78);
+        addPressButton(row, "Back", "BackSpace", 72);
+        addPressButton(row, "Del", "Delete", 62);
+        addPressButton(row, "Home", "Home", 72);
+        addPressButton(row, "End", "End", 62);
+        addPressButton(row, "PgUp", "Prior", 72);
+        addPressButton(row, "PgDn", "Next", 72);
+        addPressButton(row, "\u2190", "Left", 54);
+        addPressButton(row, "\u2191", "Up", 54);
+        addPressButton(row, "\u2193", "Down", 54);
+        addPressButton(row, "\u2192", "Right", 54);
+
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        return wrapper;
+    }
+
+    private Button addSpecialButton(LinearLayout row, String label, int widthDp) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(label);
+        button.setTextSize(12);
+        int width = (int) (widthDp * getResources().getDisplayMetrics().density);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, -2);
+        params.setMargins(4, 0, 4, 0);
+        row.addView(button, params);
+        return button;
+    }
+
+    private void addPressButton(LinearLayout row, String label, String keysym, int widthDp) {
+        Button button = addSpecialButton(row, label, widthDp);
+        button.setOnClickListener(v -> sendPress(keysym));
     }
 
     private void discoverServers() {
@@ -353,6 +427,7 @@ public class MainActivity extends Activity {
     private void disconnect() {
         RemoteConnection active = connection;
         if (active != null) {
+            releaseHeldModifiers();
             active.close();
         }
         connection = null;
@@ -409,9 +484,75 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void sendKeyEvent(String event, String keysym) {
+        RemoteConnection active = connection;
+        if (active == null) {
+            showToast("Not connected");
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", event);
+            message.put("keysym", keysym);
+            active.sendInput(message);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void toggleModifier(String keysym) {
+        if ("Control_L".equals(keysym)) {
+            ctrlHeld = !ctrlHeld;
+            sendKeyEvent(ctrlHeld ? "key_down" : "key_up", keysym);
+        } else if ("Alt_L".equals(keysym)) {
+            altHeld = !altHeld;
+            sendKeyEvent(altHeld ? "key_down" : "key_up", keysym);
+        } else if ("Shift_L".equals(keysym)) {
+            shiftHeld = !shiftHeld;
+            sendKeyEvent(shiftHeld ? "key_down" : "key_up", keysym);
+        }
+        updateModifierButtons();
+    }
+
+    private void releaseHeldModifiers() {
+        if (ctrlHeld) {
+            sendKeyEvent("key_up", "Control_L");
+        }
+        if (altHeld) {
+            sendKeyEvent("key_up", "Alt_L");
+        }
+        if (shiftHeld) {
+            sendKeyEvent("key_up", "Shift_L");
+        }
+        ctrlHeld = false;
+        altHeld = false;
+        shiftHeld = false;
+        updateModifierButtons();
+    }
+
+    private void updateModifierButtons() {
+        runOnUiThread(() -> {
+            updateModifierButton(ctrlButton, "Ctrl", ctrlHeld);
+            updateModifierButton(altButton, "Alt", altHeld);
+            updateModifierButton(shiftButton, "Shift", shiftHeld);
+        });
+    }
+
+    private void updateModifierButton(Button button, String label, boolean held) {
+        if (button == null) {
+            return;
+        }
+        button.setText(held ? label + "*" : label);
+        button.setTextColor(held ? Color.WHITE : Color.rgb(20, 20, 20));
+        button.setBackgroundColor(held ? Color.rgb(50, 110, 180) : Color.rgb(230, 230, 230));
+    }
+
     private void setFullscreen(boolean enabled) {
+        if (!enabled) {
+            releaseHeldModifiers();
+        }
         fullscreen = enabled;
         controls.setVisibility(enabled ? View.GONE : View.VISIBLE);
+        specialKeysBar.setVisibility(enabled ? View.VISIBLE : View.GONE);
         fullscreenButton.setText(enabled ? "Exit" : "Full");
         int flags = enabled
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN
