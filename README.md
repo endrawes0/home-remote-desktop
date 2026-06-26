@@ -41,14 +41,18 @@ Inside a Codex desktop workspace, the helper scripts `run-client-codex-python.ba
 Optional performance backends:
 
 ```powershell
-py -m pip install -r requirements-performance.txt
+.\install.bat --performance
 ```
+
+This installs Python performance packages and attempts to install the Visual C++ libjpeg-turbo package with winget: `libjpeg-turbo.libjpeg-turbo.VC`.
 
 TurboJPEG also requires the native libjpeg-turbo DLL. If it is not discoverable automatically, pass it explicitly:
 
 ```powershell
 .\run-server.bat --jpeg-backend turbojpeg --turbojpeg-lib-path C:\path\to\turbojpeg.dll
 ```
+
+The server automatically checks `TURBOJPEG_LIB_PATH`, `TURBOJPEG`, PATH entries, `C:\Program Files\libjpeg-turbo64\bin\turbojpeg.dll`, and `C:\libjpeg-turbo64\bin\turbojpeg.dll`.
 
 ## Run The Server
 

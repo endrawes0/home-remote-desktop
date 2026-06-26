@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import secrets
 import socket
 import threading
@@ -306,7 +307,8 @@ class TurboJpegEncoder(JpegEncoder):
             from turbojpeg import TurboJPEG
         except ImportError as exc:
             raise RuntimeError("turbojpeg package is not installed") from exc
-        self.jpeg = TurboJPEG(lib_path) if lib_path else TurboJPEG()
+        resolved_lib_path = lib_path or find_turbojpeg_library()
+        self.jpeg = TurboJPEG(resolved_lib_path) if resolved_lib_path else TurboJPEG()
 
     def encode(self, image: Image.Image) -> bytes:
         # PyTurboJPEG accepts numpy arrays; import lazily so Pillow remains the default dependency.
@@ -630,6 +632,37 @@ def create_jpeg_encoder(name: str, quality: int, optimize: bool, turbojpeg_lib_p
         except Exception:
             return JpegEncoder(quality, optimize)
     raise ValueError(f"unknown JPEG backend: {name}")
+
+
+def find_turbojpeg_library() -> str | None:
+    candidates: list[str] = []
+    for env_name in ("TURBOJPEG_LIB_PATH", "TURBOJPEG"):
+        value = os.environ.get(env_name)
+        if value:
+            candidates.append(value)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if directory:
+            candidates.append(os.path.join(directory, "turbojpeg.dll"))
+    program_files = [os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432"), os.environ.get("ProgramFiles(x86)")]
+    for root in program_files:
+        if not root:
+            continue
+        candidates.extend(
+            [
+                os.path.join(root, "libjpeg-turbo64", "bin", "turbojpeg.dll"),
+                os.path.join(root, "libjpeg-turbo", "bin", "turbojpeg.dll"),
+            ]
+        )
+    candidates.extend(
+        [
+            r"C:\libjpeg-turbo64\bin\turbojpeg.dll",
+            r"C:\libjpeg-turbo\bin\turbojpeg.dll",
+        ]
+    )
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
 
 
 def encode_stream_frame(
