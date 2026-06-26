@@ -15,6 +15,12 @@ This is intended for trusted home networks. It is not encrypted and should not b
 
 Install Python 3.11 or newer from <https://www.python.org/downloads/windows/>. During install, enable **Add python.exe to PATH**.
 
+You can also install it with winget:
+
+```powershell
+winget install Python.Python.3.12
+```
+
 Download the repository:
 
 ```powershell
