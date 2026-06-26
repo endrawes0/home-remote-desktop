@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+APP_HOME=$(cd "${0%/*}" && pwd -P)
+VERSION=8.10.2
+DIST="$HOME/.gradle/wrapper/dists/gradle-$VERSION-bin/hrd/gradle-$VERSION"
+ZIP="$HOME/.gradle/wrapper/dists/gradle-$VERSION-bin/hrd/gradle-$VERSION-bin.zip"
+if [ ! -x "$DIST/bin/gradle" ]; then
+  mkdir -p "$(dirname "$ZIP")"
+  if [ ! -f "$ZIP" ]; then
+    curl -L -o "$ZIP" "https://services.gradle.org/distributions/gradle-$VERSION-bin.zip"
+  fi
+  rm -rf "$DIST"
+  python3 - "$ZIP" "$(dirname "$DIST")" <<'PY'
+import sys
+import zipfile
+
+zip_path, out_dir = sys.argv[1], sys.argv[2]
+  with zipfile.ZipFile(zip_path) as zf:
+    zf.extractall(out_dir)
+PY
+  chmod +x "$DIST/bin/gradle"
+fi
+exec "$DIST/bin/gradle" "$@"

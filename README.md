@@ -161,3 +161,14 @@ Then run the pair sweep from the client machine:
 ```
 
 This keeps one connection open, asks the server to switch stream settings for each test, measures client decode/network behavior, uses server-reported capture/resize/encode timings, and writes a best configuration for that specific pair of machines.
+
+## Android Client
+
+An Android client project is available in `android-client/`. Build it with Android Studio or:
+
+```powershell
+cd android-client
+.\gradlew.bat assembleDebug
+```
+
+The app supports LAN discovery, passcode auth, JPEG full/delta frame display, and basic touch-to-mouse input.
