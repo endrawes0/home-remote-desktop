@@ -439,6 +439,11 @@ class RemoteDesktopServer:
 
             mss, pyautogui = import_capture_modules()
             pyautogui.FAILSAFE = False
+            pyautogui.PAUSE = 0
+            if hasattr(pyautogui, "MINIMUM_DURATION"):
+                pyautogui.MINIMUM_DURATION = 0
+            if hasattr(pyautogui, "MINIMUM_SLEEP"):
+                pyautogui.MINIMUM_SLEEP = 0
             capture = create_capture_backend(self.capture_backend_name)
             state = capture.get_state()
             capture.close()
@@ -599,7 +604,7 @@ class RemoteDesktopServer:
                 y = state.top + min(state.height - 1, int(ny * state.height))
                 button = message.get("button", "left")
                 if event == "move":
-                    pyautogui.moveTo(x, y)
+                    pyautogui.moveTo(x, y, duration=0)
                 elif event == "down":
                     pyautogui.mouseDown(x, y, button=button)
                 elif event == "up":

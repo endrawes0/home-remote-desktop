@@ -234,6 +234,9 @@ class RemoteDesktopClient(tk.Tk):
         self.pointer_down: dict[str, tuple[float, float]] = {}
         self.pointer_dragging: set[str] = set()
         self.pointer_threshold = 4
+        self.pending_move: tuple[float, float] | None = None
+        self.move_flush_after: str | None = None
+        self.move_flush_ms = 16
 
         self._build_ui()
         self.after(50, self._drain_frames)
@@ -431,6 +434,18 @@ class RemoteDesktopClient(tk.Tk):
         except OSError:
             self.disconnect()
 
+    def _queue_mouse_move(self, point: tuple[float, float]) -> None:
+        self.pending_move = point
+        if self.move_flush_after is None:
+            self.move_flush_after = self.after(self.move_flush_ms, self._flush_mouse_move)
+
+    def _flush_mouse_move(self) -> None:
+        self.move_flush_after = None
+        point = self.pending_move
+        self.pending_move = None
+        if point:
+            self._send_input({"event": "move", "nx": point[0], "ny": point[1]})
+
     def _mouse_move(self, event: tk.Event[Any]) -> None:
         point = self._normalized_point(event)
         if not point:
@@ -443,7 +458,7 @@ class RemoteDesktopClient(tk.Tk):
             if (dx * dx + dy * dy) >= self.pointer_threshold * self.pointer_threshold:
                 self.pointer_dragging.add(button)
                 self._send_input({"event": "down", "button": button, "nx": point[0], "ny": point[1]})
-        self._send_input({"event": "move", "nx": point[0], "ny": point[1]})
+        self._queue_mouse_move(point)
 
     def _mouse_press(self, event: tk.Event[Any], button: str) -> None:
         self.canvas.focus_set()
@@ -461,6 +476,7 @@ class RemoteDesktopClient(tk.Tk):
         self.pointer_dragging.discard(button)
         if not point:
             return
+        self._flush_mouse_move()
         if dragging:
             self._send_input({"event": "up", "button": button, "nx": point[0], "ny": point[1]})
         else:
@@ -511,6 +527,10 @@ class RemoteDesktopClient(tk.Tk):
 
     def disconnect(self) -> None:
         self.connected = False
+        if self.move_flush_after is not None:
+            self.after_cancel(self.move_flush_after)
+            self.move_flush_after = None
+        self.pending_move = None
         if self.sock:
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
