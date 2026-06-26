@@ -142,3 +142,17 @@ To test several configurations on the current machine and write a recommendation
 ```
 
 The recommendation includes suggested server and client commands. Run it on each machine you care about, because the best settings depend on display resolution, CPU/GPU, and installed optional backends.
+
+To test an actual client/server pair over an existing server process, start the server normally:
+
+```powershell
+.\run-server.bat --passcode 123456 --capture-backend auto
+```
+
+Then run the pair sweep from the client machine:
+
+```powershell
+.\run-client.bat --host 192.168.1.25 --passcode 123456 --pair-profile-sweep --pair-profile-seconds 6 --pair-profile-output pair-profile-recommendation.json
+```
+
+This keeps one connection open, asks the server to switch stream settings for each test, measures client decode/network behavior, uses server-reported capture/resize/encode timings, and writes a best configuration for that specific pair of machines.

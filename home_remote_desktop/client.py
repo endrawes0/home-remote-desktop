@@ -119,6 +119,92 @@ class ClientProfile:
         )
 
 
+@dataclass
+class PairProfile:
+    name: str
+    server_config: dict[str, Any]
+    started_wall: float = field(default_factory=time.time)
+    frames: int = 0
+    bytes_received: int = 0
+    receive_ms: list[float] = field(default_factory=list)
+    decode_ms: list[float] = field(default_factory=list)
+    end_to_end_ms: list[float] = field(default_factory=list)
+    inter_frame_ms: list[float] = field(default_factory=list)
+    payload_bytes: list[float] = field(default_factory=list)
+    server_capture_ms: list[float] = field(default_factory=list)
+    server_convert_resize_ms: list[float] = field(default_factory=list)
+    server_encode_ms: list[float] = field(default_factory=list)
+    server_frame_ms: list[float] = field(default_factory=list)
+    changed_tiles: list[float] = field(default_factory=list)
+    total_tiles: list[float] = field(default_factory=list)
+    first_frame_wall: float | None = None
+    last_frame_wall: float | None = None
+    stream: dict[str, int] = field(default_factory=dict)
+
+    def record(self, header: dict[str, Any], payload_size: int, receive_ms: float, decode_ms: float, received_wall_ns: int) -> None:
+        now = time.time()
+        if self.last_frame_wall is not None:
+            self.inter_frame_ms.append((now - self.last_frame_wall) * 1000.0)
+        self.first_frame_wall = self.first_frame_wall or now
+        self.last_frame_wall = now
+        self.frames += 1
+        self.bytes_received += payload_size
+        self.receive_ms.append(receive_ms)
+        self.decode_ms.append(decode_ms)
+        self.payload_bytes.append(float(payload_size))
+        self.stream = {
+            "width": int(header.get("image_w", 0)),
+            "height": int(header.get("image_h", 0)),
+        }
+        server_wall_ns = int(header.get("server_wall_ns") or 0)
+        if server_wall_ns:
+            self.end_to_end_ms.append((received_wall_ns - server_wall_ns) / 1_000_000.0)
+        for key, target in (
+            ("capture_ms", self.server_capture_ms),
+            ("convert_resize_ms", self.server_convert_resize_ms),
+            ("encode_ms", self.server_encode_ms),
+            ("server_frame_ms", self.server_frame_ms),
+            ("changed_tiles", self.changed_tiles),
+            ("total_tiles", self.total_tiles),
+        ):
+            if key in header:
+                target.append(float(header[key]))
+
+    def to_result(self) -> dict[str, Any]:
+        elapsed = max(0.001, time.time() - self.started_wall)
+        active_elapsed = elapsed
+        if self.first_frame_wall is not None and self.last_frame_wall is not None:
+            active_elapsed = max(0.001, self.last_frame_wall - self.first_frame_wall)
+        client_data = {
+            "frames": self.frames,
+            "fps": self.frames / active_elapsed,
+            "mbps": (self.bytes_received * 8.0 / active_elapsed) / 1_000_000,
+            "bytes_received": self.bytes_received,
+            "payload_bytes": summarize(self.payload_bytes),
+            "frame_wait_receive_ms": summarize(self.receive_ms),
+            "decode_ms": summarize(self.decode_ms),
+            "end_to_end_ms": summarize(self.end_to_end_ms),
+            "inter_frame_ms": summarize(self.inter_frame_ms),
+            "stream": self.stream,
+        }
+        server_data = {
+            "capture_ms": summarize(self.server_capture_ms),
+            "convert_resize_ms": summarize(self.server_convert_resize_ms),
+            "encode_ms": summarize(self.server_encode_ms),
+            "frame_ms": summarize(self.server_frame_ms),
+            "changed_tiles": summarize(self.changed_tiles),
+            "total_tiles": summarize(self.total_tiles),
+        }
+        return {
+            "name": self.name,
+            "ok": self.frames > 0,
+            "server_config": self.server_config,
+            "client": client_data,
+            "server": server_data,
+            "score": pair_config_score(client_data, server_data),
+        }
+
+
 class RemoteDesktopClient(tk.Tk):
     def __init__(self, host: str | None, port: int, passcode: str | None):
         super().__init__()
@@ -375,6 +461,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-config-output", default="profile-recommendation.json", help="Config sweep recommendation JSON path")
     parser.add_argument("--profile-config-dir", default="profile-config-results", help="Directory for per-config profiler JSON/logs")
     parser.add_argument("--profile-config-seconds", type=float, default=6.0, help="Seconds to profile each config")
+    parser.add_argument("--pair-profile-sweep", action="store_true", help="Profile multiple configs against an already-running remote server")
+    parser.add_argument("--pair-profile-output", default="pair-profile-recommendation.json", help="Pair profile recommendation JSON path")
+    parser.add_argument("--pair-profile-seconds", type=float, default=6.0, help="Seconds to test each pair profile candidate")
     return parser.parse_args()
 
 
@@ -497,6 +586,161 @@ def candidate_configs() -> list[dict[str, Any]]:
     ]
 
 
+def pair_candidate_configs() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "balanced-full",
+            "fps": 20,
+            "quality": 70,
+            "scale": 0.75,
+            "jpeg_backend": "pillow",
+            "jpeg_optimize": False,
+            "delta_mode": "off",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "balanced-full-optimized-jpeg",
+            "fps": 20,
+            "quality": 70,
+            "scale": 0.75,
+            "jpeg_backend": "pillow",
+            "jpeg_optimize": True,
+            "delta_mode": "off",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "fast-full",
+            "fps": 20,
+            "quality": 60,
+            "scale": 0.5,
+            "jpeg_backend": "pillow",
+            "jpeg_optimize": False,
+            "delta_mode": "off",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "fast-delta",
+            "fps": 20,
+            "quality": 60,
+            "scale": 0.5,
+            "jpeg_backend": "pillow",
+            "jpeg_optimize": False,
+            "delta_mode": "tiles",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+        {
+            "name": "auto-encoder-delta",
+            "fps": 20,
+            "quality": 60,
+            "scale": 0.5,
+            "jpeg_backend": "auto",
+            "jpeg_optimize": False,
+            "delta_mode": "tiles",
+            "tile_size": 384,
+            "full_frame_interval": 90,
+        },
+    ]
+
+
+def run_pair_profile_sweep(host: str, port: int, passcode: str, seconds: float, output_path: str) -> None:
+    sock = socket.create_connection((host, port), timeout=8)
+    desktop_image: Image.Image | None = None
+    results: list[dict[str, Any]] = []
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        send_packet(sock, {"type": "hello", "passcode": passcode, "client": socket.gethostname(), "pair_profile": True})
+        auth, _ = recv_packet(sock)
+        if not auth.get("ok"):
+            raise ConnectionError(str(auth.get("error") or "authentication failed"))
+        for config in pair_candidate_configs():
+            send_packet(sock, {"type": "input", "event": "set_stream_config", **config})
+            desktop_image = None
+            deadline = time.monotonic() + seconds
+            warmup_frames = 2
+            profile = PairProfile(config["name"], config)
+            while time.monotonic() < deadline:
+                receive_started = time.perf_counter()
+                header, payload = recv_packet(sock)
+                received = time.perf_counter()
+                received_wall_ns = time.time_ns()
+                if header.get("type") != "frame":
+                    continue
+                decode_started = time.perf_counter()
+                desktop_image = apply_frame_payload(header, payload, desktop_image)
+                decoded = time.perf_counter()
+                if header.get("config_name") != config["name"]:
+                    continue
+                if warmup_frames > 0:
+                    warmup_frames -= 1
+                    continue
+                profile.record(
+                    header,
+                    len(payload),
+                    (received - receive_started) * 1000.0,
+                    (decoded - decode_started) * 1000.0,
+                    received_wall_ns,
+                )
+            results.append(profile.to_result())
+    finally:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+
+    successful = [result for result in results if result.get("ok")]
+    best = max(successful, key=lambda item: item["score"]) if successful else None
+    recommendation: dict[str, Any] = {
+        "role": "pair-profile-recommendation",
+        "host": host,
+        "port": port,
+        "tested_seconds_per_config": seconds,
+        "results": results,
+        "recommended": None,
+    }
+    if best:
+        flags = config_to_server_flags(best["server_config"])
+        recommendation["recommended"] = {
+            "name": best["name"],
+            "score": best["score"],
+            "server_command": f".\\run-server.bat --passcode {passcode} {flags}",
+            "client_command": f".\\run-client.bat --host {host}",
+            "pair_profile_command": (
+                f".\\run-client.bat --host {host} --passcode {passcode} "
+                f"--pair-profile-sweep --pair-profile-seconds {seconds:g} --pair-profile-output {output_path}"
+            ),
+            "why": "Chosen from an active client/server connection using client decode, bandwidth, FPS, and server-reported frame timings.",
+        }
+    write_json(output_path, recommendation)
+
+
+def config_to_server_flags(config: dict[str, Any]) -> str:
+    optimize_flag = "--jpeg-optimize" if config.get("jpeg_optimize") else "--no-jpeg-optimize"
+    return " ".join(
+        [
+            "--fps",
+            str(config["fps"]),
+            "--quality",
+            str(config["quality"]),
+            "--scale",
+            str(config["scale"]),
+            "--jpeg-backend",
+            str(config["jpeg_backend"]),
+            "--delta-mode",
+            str(config["delta_mode"]),
+            "--tile-size",
+            str(config["tile_size"]),
+            "--full-frame-interval",
+            str(config["full_frame_interval"]),
+            optimize_flag,
+        ]
+    )
+
+
 def run_config_sweep(output_path: str, result_dir: str, seconds: float) -> None:
     result_root = Path(result_dir)
     result_root.mkdir(parents=True, exist_ok=True)
@@ -608,8 +852,22 @@ def config_score(server_data: dict[str, Any], client_data: dict[str, Any]) -> fl
     return fps - (mbps * 0.03) - (decode_ms * 0.01) - (frame_ms * 0.002)
 
 
+def pair_config_score(client_data: dict[str, Any], server_data: dict[str, Any]) -> float:
+    fps = float(client_data.get("fps", 0.0))
+    mbps = float(client_data.get("mbps", 0.0))
+    decode_ms = float(client_data.get("decode_ms", {}).get("avg", 0.0))
+    server_frame_ms = float(server_data.get("frame_ms", {}).get("avg", 0.0))
+    end_to_end_ms = float(client_data.get("end_to_end_ms", {}).get("avg", 0.0))
+    return fps - (mbps * 0.04) - (decode_ms * 0.01) - (server_frame_ms * 0.002) - (end_to_end_ms * 0.001)
+
+
 def main() -> None:
     args = parse_args()
+    if args.pair_profile_sweep:
+        if not args.host or not args.passcode:
+            raise SystemExit("--pair-profile-sweep requires --host and --passcode")
+        run_pair_profile_sweep(args.host, args.port, args.passcode, args.pair_profile_seconds, args.pair_profile_output)
+        return
     if args.profile_config_sweep:
         run_config_sweep(args.profile_config_output, args.profile_config_dir, args.profile_config_seconds)
         return

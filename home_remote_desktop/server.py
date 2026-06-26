@@ -70,6 +70,36 @@ class EncodedFrame:
 
 
 @dataclass
+class StreamConfig:
+    name: str
+    fps: int
+    quality: int
+    scale: float
+    jpeg_backend: str
+    jpeg_optimize: bool
+    turbojpeg_lib_path: str | None
+    delta_mode: str
+    tile_size: int
+    full_frame_interval: int
+    generation: int = 0
+
+
+class StreamConfigState:
+    def __init__(self, config: StreamConfig) -> None:
+        self._config = config
+        self._lock = threading.Lock()
+
+    def get(self) -> StreamConfig:
+        with self._lock:
+            return StreamConfig(**vars(self._config))
+
+    def update(self, config: StreamConfig) -> None:
+        with self._lock:
+            config.generation = self._config.generation + 1
+            self._config = config
+
+
+@dataclass
 class ServerProfile:
     output_path: str
     started_wall: float = field(default_factory=time.time)
@@ -321,6 +351,34 @@ class RemoteDesktopServer:
         self.full_frame_interval = max(1, full_frame_interval)
         self.stop_event = threading.Event()
 
+    def default_stream_config(self) -> StreamConfig:
+        return StreamConfig(
+            name="default",
+            fps=self.fps,
+            quality=self.quality,
+            scale=self.scale,
+            jpeg_backend=self.jpeg_backend_name,
+            jpeg_optimize=self.jpeg_optimize,
+            turbojpeg_lib_path=self.turbojpeg_lib_path,
+            delta_mode=self.delta_mode,
+            tile_size=self.tile_size,
+            full_frame_interval=self.full_frame_interval,
+        )
+
+    def stream_config_from_message(self, message: dict[str, Any]) -> StreamConfig:
+        return StreamConfig(
+            name=str(message.get("name") or "remote-config"),
+            fps=max(1, min(int(message.get("fps", self.fps)), 30)),
+            quality=max(35, min(int(message.get("quality", self.quality)), 95)),
+            scale=max(0.2, min(float(message.get("scale", self.scale)), 1.0)),
+            jpeg_backend=str(message.get("jpeg_backend") or self.jpeg_backend_name),
+            jpeg_optimize=bool(message.get("jpeg_optimize", self.jpeg_optimize)),
+            turbojpeg_lib_path=message.get("turbojpeg_lib_path") or self.turbojpeg_lib_path,
+            delta_mode=str(message.get("delta_mode") or self.delta_mode),
+            tile_size=max(64, min(int(message.get("tile_size", self.tile_size)), 1024)),
+            full_frame_interval=max(1, int(message.get("full_frame_interval", self.full_frame_interval))),
+        )
+
     def start(self) -> None:
         discovery = threading.Thread(target=self._discovery_loop, daemon=True)
         discovery.start()
@@ -382,15 +440,16 @@ class RemoteDesktopServer:
             send_lock = threading.Lock()
             alive = threading.Event()
             alive.set()
+            config_state = StreamConfigState(self.default_stream_config())
             if self.profile_output:
                 profile = ServerProfile(self.profile_output)
             stream = threading.Thread(
                 target=self._stream_frames,
-                args=(client, send_lock, alive, state, profile),
+                args=(client, send_lock, alive, state, profile, config_state),
                 daemon=True,
             )
             stream.start()
-            self._input_loop(client, pyautogui, alive, state)
+            self._input_loop(client, pyautogui, alive, state, config_state)
         except Exception as exc:
             print(f"Client {addr[0]} disconnected: {exc}")
         finally:
@@ -413,20 +472,29 @@ class RemoteDesktopServer:
         alive: threading.Event,
         state: CaptureState,
         profile: ServerProfile | None,
+        config_state: StreamConfigState,
     ) -> None:
         interval = 1.0 / self.fps
         frame = 0
         capture = create_capture_backend(self.capture_backend_name)
-        encoder = create_jpeg_encoder(self.jpeg_backend_name, self.quality, self.jpeg_optimize, self.turbojpeg_lib_path)
+        config = config_state.get()
+        encoder = create_jpeg_encoder(config.jpeg_backend, config.quality, config.jpeg_optimize, config.turbojpeg_lib_path)
         previous: Image.Image | None = None
+        current_generation = config.generation
         try:
             while alive.is_set():
+                config = config_state.get()
+                if config.generation != current_generation:
+                    encoder = create_jpeg_encoder(config.jpeg_backend, config.quality, config.jpeg_optimize, config.turbojpeg_lib_path)
+                    previous = None
+                    current_generation = config.generation
+                interval = 1.0 / config.fps
                 started = time.perf_counter()
                 capture_started = time.perf_counter()
                 image = capture.grab()
                 captured = time.perf_counter()
-                if self.scale != 1.0:
-                    new_size = (max(1, int(image.width * self.scale)), max(1, int(image.height * self.scale)))
+                if config.scale != 1.0:
+                    new_size = (max(1, int(image.width * config.scale)), max(1, int(image.height * config.scale)))
                     image = image.resize(new_size, Image.Resampling.BILINEAR)
                 converted = time.perf_counter()
                 encoded_frame = encode_stream_frame(
@@ -434,9 +502,9 @@ class RemoteDesktopServer:
                     previous=previous,
                     encoder=encoder,
                     frame=frame,
-                    delta_mode=self.delta_mode,
-                    tile_size=self.tile_size,
-                    full_frame_interval=self.full_frame_interval,
+                    delta_mode=config.delta_mode,
+                    tile_size=config.tile_size,
+                    full_frame_interval=config.full_frame_interval,
                 )
                 encoded = time.perf_counter()
                 previous = image.copy()
@@ -451,6 +519,14 @@ class RemoteDesktopServer:
                     "format": "jpeg",
                     "mode": encoded_frame.mode,
                     "tiles": encoded_frame.tiles,
+                    "config_name": config.name,
+                    "config_generation": config.generation,
+                    "capture_ms": (captured - capture_started) * 1000.0,
+                    "convert_resize_ms": (converted - captured) * 1000.0,
+                    "encode_ms": (encoded - converted) * 1000.0,
+                    "server_frame_ms": (encoded - started) * 1000.0,
+                    "changed_tiles": encoded_frame.changed_tiles,
+                    "total_tiles": encoded_frame.total_tiles,
                 }
                 try:
                     send_started = time.perf_counter()
@@ -471,16 +547,16 @@ class RemoteDesktopServer:
                         image_width=encoded_frame.image_width,
                         image_height=encoded_frame.image_height,
                         state=state,
-                        quality=self.quality,
-                        scale=self.scale,
-                        fps_limit=self.fps,
+                        quality=config.quality,
+                        scale=config.scale,
+                        fps_limit=config.fps,
                         capture_backend=capture.name,
                         jpeg_backend=encoder.name,
-                        jpeg_optimize=self.jpeg_optimize,
-                        turbojpeg_lib_path=self.turbojpeg_lib_path,
-                        delta_mode=self.delta_mode,
-                        tile_size=self.tile_size,
-                        full_frame_interval=self.full_frame_interval,
+                        jpeg_optimize=config.jpeg_optimize,
+                        turbojpeg_lib_path=config.turbojpeg_lib_path,
+                        delta_mode=config.delta_mode,
+                        tile_size=config.tile_size,
+                        full_frame_interval=config.full_frame_interval,
                         changed_tiles=encoded_frame.changed_tiles,
                         total_tiles=encoded_frame.total_tiles,
                     )
@@ -491,12 +567,22 @@ class RemoteDesktopServer:
         finally:
             capture.close()
 
-    def _input_loop(self, client: socket.socket, pyautogui: Any, alive: threading.Event, state: CaptureState) -> None:
+    def _input_loop(
+        self,
+        client: socket.socket,
+        pyautogui: Any,
+        alive: threading.Event,
+        state: CaptureState,
+        config_state: StreamConfigState,
+    ) -> None:
         while alive.is_set():
             message, _ = recv_packet(client)
             if message.get("type") != "input":
                 continue
             event = message.get("event")
+            if event == "set_stream_config":
+                config_state.update(self.stream_config_from_message(message))
+                continue
             if event in {"move", "down", "up", "click"}:
                 x = state.left + int(float(message.get("nx", 0)) * state.width)
                 y = state.top + int(float(message.get("ny", 0)) * state.height)
