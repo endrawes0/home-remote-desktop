@@ -236,7 +236,7 @@ class MssCapture(CaptureBackend):
     def __init__(self) -> None:
         import mss
 
-        self.screen = mss.mss()
+        self.screen = mss.MSS()
         monitor = self.screen.monitors[1]
         self.monitor = {"left": monitor["left"], "top": monitor["top"], "width": monitor["width"], "height": monitor["height"]}
         self.state = CaptureState(monitor["left"], monitor["top"], monitor["width"], monitor["height"])
