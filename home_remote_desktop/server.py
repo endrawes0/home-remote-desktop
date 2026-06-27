@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import io
 import json
 import os
@@ -48,6 +49,12 @@ KEY_MAP = {
     "Shift_R": "shift",
     "Alt_L": "alt",
     "Alt_R": "alt",
+    "Super_L": "win",
+    "Super_R": "win",
+    "Meta_L": "win",
+    "Meta_R": "win",
+    "Win_L": "win",
+    "Win_R": "win",
 }
 
 
@@ -233,11 +240,13 @@ class CaptureBackend:
 class MssCapture(CaptureBackend):
     name = "mss"
 
-    def __init__(self) -> None:
+    def __init__(self, monitor_index: int = 1) -> None:
         import mss
 
         self.screen = mss.MSS()
-        monitor = self.screen.monitors[1]
+        if monitor_index < 0 or monitor_index >= len(self.screen.monitors):
+            raise ValueError(f"invalid MSS monitor index {monitor_index}; available 0-{len(self.screen.monitors) - 1}")
+        monitor = self.screen.monitors[monitor_index]
         self.monitor = {"left": monitor["left"], "top": monitor["top"], "width": monitor["width"], "height": monitor["height"]}
         self.state = CaptureState(monitor["left"], monitor["top"], monitor["width"], monitor["height"])
 
@@ -340,6 +349,8 @@ class RemoteDesktopServer:
         delta_mode: str,
         tile_size: int,
         full_frame_interval: int,
+        mss_monitor_index: int,
+        trace_input: bool,
     ):
         self.name = name
         self.passcode = passcode
@@ -356,6 +367,8 @@ class RemoteDesktopServer:
         self.delta_mode = delta_mode
         self.tile_size = max(64, min(tile_size, 1024))
         self.full_frame_interval = max(1, full_frame_interval)
+        self.mss_monitor_index = max(0, mss_monitor_index)
+        self.trace_input = trace_input
         self.stop_event = threading.Event()
 
     def default_stream_config(self) -> StreamConfig:
@@ -429,6 +442,7 @@ class RemoteDesktopServer:
     def _handle_client(self, client: socket.socket, addr: tuple[str, int]) -> None:
         alive: threading.Event | None = None
         stream: threading.Thread | None = None
+        focus: threading.Thread | None = None
         profile: ServerProfile | None = None
         try:
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -444,7 +458,7 @@ class RemoteDesktopServer:
                 pyautogui.MINIMUM_DURATION = 0
             if hasattr(pyautogui, "MINIMUM_SLEEP"):
                 pyautogui.MINIMUM_SLEEP = 0
-            capture = create_capture_backend(self.capture_backend_name)
+            capture = create_capture_backend(self.capture_backend_name, self.mss_monitor_index)
             state = capture.get_state()
             capture.close()
 
@@ -461,6 +475,12 @@ class RemoteDesktopServer:
                 daemon=True,
             )
             stream.start()
+            focus = threading.Thread(
+                target=self._keyboard_focus_loop,
+                args=(client, send_lock, alive),
+                daemon=True,
+            )
+            focus.start()
             self._input_loop(client, pyautogui, alive, state, config_state)
         except (ConnectionError, OSError):
             print(f"Client {addr[0]} disconnected", flush=True)
@@ -475,6 +495,8 @@ class RemoteDesktopServer:
                 pass
             if stream:
                 stream.join(timeout=2.0)
+            if focus:
+                focus.join(timeout=1.0)
             if profile:
                 profile.write()
                 print(f"Wrote server profile to {profile.output_path}")
@@ -490,7 +512,7 @@ class RemoteDesktopServer:
     ) -> None:
         interval = 1.0 / self.fps
         frame = 0
-        capture = create_capture_backend(self.capture_backend_name)
+        capture = create_capture_backend(self.capture_backend_name, self.mss_monitor_index)
         config = config_state.get()
         encoder = create_jpeg_encoder(config.jpeg_backend, config.quality, config.jpeg_optimize, config.turbojpeg_lib_path)
         previous: Image.Image | None = None
@@ -599,12 +621,27 @@ class RemoteDesktopServer:
             if event == "set_stream_config":
                 config_state.update(self.stream_config_from_message(message))
                 continue
+            if event == "move_relative":
+                dx = float(message.get("dx", 0))
+                dy = float(message.get("dy", 0))
+                if self.trace_input:
+                    print(f"Input: move_relative dx={dx:.1f} dy={dy:.1f}", flush=True)
+                pyautogui.moveRel(dx, dy, duration=0)
+                continue
+            if event == "click_current":
+                button = message.get("button", "left")
+                if self.trace_input:
+                    print(f"Input: click_current {button}", flush=True)
+                pyautogui.click(button=button)
+                continue
             if event in {"move", "down", "up", "click"}:
                 nx = min(1.0, max(0.0, float(message.get("nx", 0))))
                 ny = min(1.0, max(0.0, float(message.get("ny", 0))))
                 x = state.left + min(state.width - 1, int(nx * state.width))
                 y = state.top + min(state.height - 1, int(ny * state.height))
                 button = message.get("button", "left")
+                if self.trace_input and event != "move":
+                    print(f"Input: {event} {button} nx={nx:.3f} ny={ny:.3f} x={x} y={y}", flush=True)
                 if event == "move":
                     pyautogui.moveTo(x, y, duration=0)
                 elif event == "down":
@@ -618,30 +655,160 @@ class RemoteDesktopServer:
             elif event == "text":
                 text = str(message.get("text", ""))
                 if text:
+                    if self.trace_input:
+                        print(f"Input: text {len(text)} chars", flush=True)
                     pyautogui.write(text, interval=0)
             elif event == "press":
                 key = normalize_key(message)
                 if key:
+                    if self.trace_input:
+                        print(f"Input: press {key}", flush=True)
                     pyautogui.press(key)
             elif event in {"key_down", "key_up"}:
                 key = normalize_key(message)
                 if key:
+                    if self.trace_input:
+                        print(f"Input: {event} {key}", flush=True)
                     if event == "key_down":
                         pyautogui.keyDown(key)
                     else:
                         pyautogui.keyUp(key)
 
+    def _keyboard_focus_loop(
+        self,
+        client: socket.socket,
+        send_lock: threading.Lock,
+        alive: threading.Event,
+    ) -> None:
+        detector = WindowsTextFocusDetector()
+        last_editable: bool | None = None
+        while alive.is_set():
+            editable = detector.is_text_entry_focused()
+            if editable != last_editable:
+                packet = {
+                    "type": "ime",
+                    "action": "show" if editable else "hide",
+                    "text_entry_focused": editable,
+                }
+                try:
+                    with send_lock:
+                        send_packet(client, packet)
+                except OSError:
+                    alive.clear()
+                    return
+                last_editable = editable
+            time.sleep(0.25)
 
-def create_capture_backend(name: str) -> CaptureBackend:
+
+class WindowsTextFocusDetector:
+    EDITABLE_CLASS_PARTS = (
+        "edit",
+        "richedit",
+        "text",
+        "textbox",
+        "scintilla",
+        "consolewindowclass",
+    )
+
+    def __init__(self) -> None:
+        self.uia: Any | None = None
+        self.uia_defs: Any | None = None
+        try:
+            import comtypes.client
+
+            comtypes.client.GetModule("UIAutomationCore.dll")
+            from comtypes.gen.UIAutomationClient import CUIAutomation, IUIAutomation
+            from comtypes.gen import UIAutomationClient as uia_defs
+
+            self.uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+            self.uia_defs = uia_defs
+        except Exception:
+            self.uia = None
+            self.uia_defs = None
+
+    def is_text_entry_focused(self) -> bool:
+        uia_result = self._uia_text_entry_focused()
+        if uia_result is not None:
+            return uia_result
+        return self._focused_class_is_editable()
+
+    def _uia_text_entry_focused(self) -> bool | None:
+        if self.uia is None or self.uia_defs is None:
+            return None
+        try:
+            element = self.uia.GetFocusedElement()
+            if not element or not bool(element.CurrentIsEnabled):
+                return False
+            control_type = int(element.CurrentControlType)
+            class_name = str(element.CurrentClassName or "").lower()
+            defs = self.uia_defs
+            if control_type in {
+                defs.UIA_EditControlTypeId,
+                defs.UIA_DocumentControlTypeId,
+                defs.UIA_ComboBoxControlTypeId,
+            }:
+                return True
+            value_available = bool(element.GetCurrentPropertyValue(defs.UIA_IsValuePatternAvailablePropertyId))
+            text_available = bool(element.GetCurrentPropertyValue(defs.UIA_IsTextPatternAvailablePropertyId))
+            if value_available and any(part in class_name for part in self.EDITABLE_CLASS_PARTS):
+                return True
+            if text_available and any(part in class_name for part in self.EDITABLE_CLASS_PARTS):
+                return True
+            return False
+        except Exception:
+            return None
+
+    def _focused_class_is_editable(self) -> bool:
+        hwnd = focused_control_hwnd()
+        if not hwnd:
+            return False
+        class_name = window_class_name(hwnd).lower()
+        return any(part in class_name for part in self.EDITABLE_CLASS_PARTS)
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("flags", ctypes.c_uint),
+        ("hwndActive", ctypes.c_void_p),
+        ("hwndFocus", ctypes.c_void_p),
+        ("hwndCapture", ctypes.c_void_p),
+        ("hwndMenuOwner", ctypes.c_void_p),
+        ("hwndMoveSize", ctypes.c_void_p),
+        ("hwndCaret", ctypes.c_void_p),
+        ("rcCaret", ctypes.c_long * 4),
+    ]
+
+
+def focused_control_hwnd() -> int:
+    user32 = ctypes.windll.user32
+    foreground = user32.GetForegroundWindow()
+    if not foreground:
+        return 0
+    thread_id = user32.GetWindowThreadProcessId(ctypes.c_void_p(foreground), None)
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
+        return int(info.hwndFocus or foreground)
+    return int(foreground)
+
+
+def window_class_name(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(ctypes.c_void_p(hwnd), buffer, len(buffer))
+    return buffer.value
+
+
+def create_capture_backend(name: str, mss_monitor_index: int = 1) -> CaptureBackend:
     if name == "mss":
-        return MssCapture()
+        return MssCapture(mss_monitor_index)
     if name == "dxcam":
         return DxcamCapture()
     if name == "auto":
         try:
             return DxcamCapture()
         except Exception:
-            return MssCapture()
+            return MssCapture(mss_monitor_index)
     raise ValueError(f"unknown capture backend: {name}")
 
 
@@ -789,12 +956,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale", type=float, default=0.75, help="Stream scale 0.2-1.0")
     parser.add_argument("--profile-output", default=None, help="Write server-side profiling JSON after a client disconnects")
     parser.add_argument("--capture-backend", choices=["mss", "dxcam", "auto"], default="mss", help="Screen capture backend")
+    parser.add_argument("--mss-monitor-index", type=int, default=1, help="MSS monitor index to stream; 0 captures the virtual desktop")
     parser.add_argument("--jpeg-backend", choices=["pillow", "turbojpeg", "auto"], default="pillow", help="JPEG encoder backend")
     parser.add_argument("--jpeg-optimize", action=argparse.BooleanOptionalAction, default=False, help="Enable Pillow JPEG optimize")
     parser.add_argument("--turbojpeg-lib-path", default=None, help="Path to the native turbojpeg DLL when using PyTurboJPEG")
     parser.add_argument("--delta-mode", choices=["off", "tiles"], default="off", help="Send changed JPEG tiles after full frames")
     parser.add_argument("--tile-size", type=int, default=384, help="Delta tile size in pixels")
     parser.add_argument("--full-frame-interval", type=int, default=90, help="Send a full frame every N frames in delta mode")
+    parser.add_argument("--trace-input", action="store_true", help="Print input events received from clients")
     return parser.parse_args()
 
 
@@ -817,6 +986,8 @@ def main() -> None:
         args.delta_mode,
         args.tile_size,
         args.full_frame_interval,
+        args.mss_monitor_index,
+        args.trace_input,
     ).start()
 
 

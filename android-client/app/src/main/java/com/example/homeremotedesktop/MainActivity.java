@@ -1,6 +1,7 @@
 package com.example.homeremotedesktop;
 
 import android.app.Activity;
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -10,13 +11,21 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -38,6 +47,8 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int DISCOVERY_PORT = 51333;
@@ -51,13 +62,21 @@ public class MainActivity extends Activity {
     private EditText portField;
     private EditText passcodeField;
     private EditText textField;
+    private EditText keyboardSink;
     private TextView statusView;
     private LinearLayout controls;
     private Button connectButton;
     private Button fullscreenButton;
+    private LinearLayout specialKeysBar;
+    private Button ctrlButton;
+    private Button altButton;
+    private Button shiftButton;
     private DesktopView desktopView;
-    private RemoteConnection connection;
+    private volatile RemoteConnection connection;
     private boolean fullscreen;
+    private boolean ctrlHeld;
+    private boolean altHeld;
+    private boolean shiftHeld;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -167,6 +186,55 @@ public class MainActivity extends Activity {
         statusView.setText("Ready");
         controls.addView(statusView);
 
+        keyboardSink = new EditText(this);
+        keyboardSink.setSingleLine(true);
+        keyboardSink.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        keyboardSink.setImeOptions(EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        keyboardSink.setAlpha(0.01f);
+        keyboardSink.setMinWidth(1);
+        keyboardSink.setMinHeight(1);
+        keyboardSink.setPadding(0, 0, 0, 0);
+        keyboardSink.addTextChangedListener(new TextWatcher() {
+            private boolean clearing;
+
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable editable) {
+                if (clearing || editable.length() == 0) {
+                    return;
+                }
+                sendKeyboardText(editable.toString());
+                clearing = true;
+                editable.clear();
+                clearing = false;
+            }
+        });
+        keyboardSink.setOnEditorActionListener((view, actionId, event) -> {
+            sendPress("Return");
+            return true;
+        });
+        keyboardSink.setOnKeyListener((view, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) {
+                return false;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DEL) {
+                sendPress("BackSpace");
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_ENTER) {
+                sendPress("Return");
+                return true;
+            }
+            return false;
+        });
+
         desktopView = new DesktopView(this);
         desktopView.setInputSender(message -> {
             RemoteConnection active = connection;
@@ -176,9 +244,76 @@ public class MainActivity extends Activity {
         });
         desktopView.setFullscreenToggle(() -> setFullscreen(!fullscreen));
 
+        FrameLayout desktopContainer = new FrameLayout(this);
+        desktopContainer.addView(desktopView, new FrameLayout.LayoutParams(-1, -1));
+        specialKeysBar = buildSpecialKeysBar();
+        FrameLayout.LayoutParams specialKeysParams = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        desktopContainer.addView(specialKeysBar, specialKeysParams);
+        specialKeysBar.setVisibility(View.GONE);
+
         root.addView(controls, new LinearLayout.LayoutParams(-1, -2));
-        root.addView(desktopView, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(keyboardSink, new LinearLayout.LayoutParams(1, 1));
+        root.addView(desktopContainer, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
+    }
+
+    private LinearLayout buildSpecialKeysBar() {
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setFillViewport(false);
+        scroll.setBackgroundColor(Color.argb(210, 20, 20, 20));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(8, 6, 8, 6);
+        scroll.addView(row, new HorizontalScrollView.LayoutParams(-2, -2));
+
+        Button winButton = addSpecialButton(row, "Win", 64);
+        winButton.setOnClickListener(v -> sendPress("Super_L"));
+        Button keyboardButton = addSpecialButton(row, "Kbd", 64);
+        keyboardButton.setOnClickListener(v -> showSoftwareKeyboard());
+        ctrlButton = addSpecialButton(row, "Ctrl", 64);
+        ctrlButton.setOnClickListener(v -> toggleModifier("Control_L"));
+        altButton = addSpecialButton(row, "Alt", 64);
+        altButton.setOnClickListener(v -> toggleModifier("Alt_L"));
+        shiftButton = addSpecialButton(row, "Shift", 74);
+        shiftButton.setOnClickListener(v -> toggleModifier("Shift_L"));
+
+        addPressButton(row, "Esc", "Escape", 62);
+        addPressButton(row, "Tab", "Tab", 62);
+        addPressButton(row, "Enter", "Return", 78);
+        addPressButton(row, "Back", "BackSpace", 72);
+        addPressButton(row, "Del", "Delete", 62);
+        addPressButton(row, "Home", "Home", 72);
+        addPressButton(row, "End", "End", 62);
+        addPressButton(row, "PgUp", "Prior", 72);
+        addPressButton(row, "PgDn", "Next", 72);
+        addPressButton(row, "\u2190", "Left", 54);
+        addPressButton(row, "\u2191", "Up", 54);
+        addPressButton(row, "\u2193", "Down", 54);
+        addPressButton(row, "\u2192", "Right", 54);
+
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        return wrapper;
+    }
+
+    private Button addSpecialButton(LinearLayout row, String label, int widthDp) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(label);
+        button.setTextSize(12);
+        int width = (int) (widthDp * getResources().getDisplayMetrics().density);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, -2);
+        params.setMargins(4, 0, 4, 0);
+        row.addView(button, params);
+        return button;
+    }
+
+    private void addPressButton(LinearLayout row, String label, String keysym, int widthDp) {
+        Button button = addSpecialButton(row, label, widthDp);
+        button.setOnClickListener(v -> sendPress(keysym));
     }
 
     private void discoverServers() {
@@ -294,6 +429,7 @@ public class MainActivity extends Activity {
     private void disconnect() {
         RemoteConnection active = connection;
         if (active != null) {
+            releaseHeldModifiers();
             active.close();
         }
         connection = null;
@@ -321,6 +457,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void sendKeyboardText(String text) {
+        RemoteConnection active = connection;
+        if (active == null || text.isEmpty()) {
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", "text");
+            message.put("text", text);
+            active.sendInput(message);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void sendPress(String keysym) {
         RemoteConnection active = connection;
         if (active == null) {
@@ -336,9 +486,75 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void sendKeyEvent(String event, String keysym) {
+        RemoteConnection active = connection;
+        if (active == null) {
+            showToast("Not connected");
+            return;
+        }
+        try {
+            JSONObject message = new JSONObject();
+            message.put("event", event);
+            message.put("keysym", keysym);
+            active.sendInput(message);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void toggleModifier(String keysym) {
+        if ("Control_L".equals(keysym)) {
+            ctrlHeld = !ctrlHeld;
+            sendKeyEvent(ctrlHeld ? "key_down" : "key_up", keysym);
+        } else if ("Alt_L".equals(keysym)) {
+            altHeld = !altHeld;
+            sendKeyEvent(altHeld ? "key_down" : "key_up", keysym);
+        } else if ("Shift_L".equals(keysym)) {
+            shiftHeld = !shiftHeld;
+            sendKeyEvent(shiftHeld ? "key_down" : "key_up", keysym);
+        }
+        updateModifierButtons();
+    }
+
+    private void releaseHeldModifiers() {
+        if (ctrlHeld) {
+            sendKeyEvent("key_up", "Control_L");
+        }
+        if (altHeld) {
+            sendKeyEvent("key_up", "Alt_L");
+        }
+        if (shiftHeld) {
+            sendKeyEvent("key_up", "Shift_L");
+        }
+        ctrlHeld = false;
+        altHeld = false;
+        shiftHeld = false;
+        updateModifierButtons();
+    }
+
+    private void updateModifierButtons() {
+        runOnUiThread(() -> {
+            updateModifierButton(ctrlButton, "Ctrl", ctrlHeld);
+            updateModifierButton(altButton, "Alt", altHeld);
+            updateModifierButton(shiftButton, "Shift", shiftHeld);
+        });
+    }
+
+    private void updateModifierButton(Button button, String label, boolean held) {
+        if (button == null) {
+            return;
+        }
+        button.setText(held ? label + "*" : label);
+        button.setTextColor(held ? Color.WHITE : Color.rgb(20, 20, 20));
+        button.setBackgroundColor(held ? Color.rgb(50, 110, 180) : Color.rgb(230, 230, 230));
+    }
+
     private void setFullscreen(boolean enabled) {
+        if (!enabled) {
+            releaseHeldModifiers();
+        }
         fullscreen = enabled;
         controls.setVisibility(enabled ? View.GONE : View.VISIBLE);
+        specialKeysBar.setVisibility(enabled ? View.VISIBLE : View.GONE);
         fullscreenButton.setText(enabled ? "Exit" : "Full");
         int flags = enabled
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN
@@ -363,6 +579,34 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_LONG).show());
     }
 
+    private void showSoftwareKeyboard() {
+        runOnUiThread(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) {
+                return;
+            }
+            keyboardSink.requestFocus();
+            imm.showSoftInput(keyboardSink, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private void handleIme(JSONObject message) {
+        String action = message.optString("action", "hide");
+        runOnUiThread(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) {
+                return;
+            }
+            if ("show".equals(action)) {
+                showSoftwareKeyboard();
+            } else {
+                keyboardSink.clearFocus();
+                imm.hideSoftInputFromWindow(keyboardSink.getWindowToken(), 0);
+                desktopView.requestFocus();
+            }
+        });
+    }
+
     private static final class ServerInfo {
         final String name;
         final String host;
@@ -380,9 +624,10 @@ public class MainActivity extends Activity {
         private final int port;
         private final String passcode;
         private final Object sendLock = new Object();
+        private final ExecutorService inputExecutor = Executors.newSingleThreadExecutor();
         private volatile boolean running = true;
-        private Socket socket;
-        private OutputStream output;
+        private volatile Socket socket;
+        private volatile OutputStream output;
         private Bitmap desktopBitmap;
 
         RemoteConnection(String host, int port, String passcode) {
@@ -414,7 +659,12 @@ public class MainActivity extends Activity {
                 setStatus("Connected to " + host + ":" + port);
                 while (running) {
                     Packet packet = readPacket(input);
-                    if (!"frame".equals(packet.header.optString("type"))) {
+                    String type = packet.header.optString("type");
+                    if ("ime".equals(type)) {
+                        handleIme(packet.header);
+                        continue;
+                    }
+                    if (!"frame".equals(type)) {
                         continue;
                     }
                     Bitmap frame = applyFrame(packet.header, packet.payload);
@@ -437,18 +687,24 @@ public class MainActivity extends Activity {
             if (!running || output == null) {
                 return;
             }
-            try {
-                JSONObject envelope = new JSONObject(message.toString());
-                envelope.put("type", "input");
-                synchronized (sendLock) {
-                    sendPacket(output, envelope, null);
+            inputExecutor.execute(() -> {
+                if (!running || output == null) {
+                    return;
                 }
-            } catch (Exception ignored) {
-            }
+                try {
+                    JSONObject envelope = new JSONObject(message.toString());
+                    envelope.put("type", "input");
+                    synchronized (sendLock) {
+                        sendPacket(output, envelope, null);
+                    }
+                } catch (Exception ignored) {
+                }
+            });
         }
 
         void close() {
             running = false;
+            inputExecutor.shutdownNow();
             try {
                 if (socket != null) {
                     socket.close();
@@ -544,6 +800,9 @@ public class MainActivity extends Activity {
         private InputSender inputSender;
         private Runnable fullscreenToggle;
         private boolean dragging;
+        private boolean touchpadMode;
+        private float lastX;
+        private float lastY;
         private float downX;
         private float downY;
         private float downNx;
@@ -554,6 +813,9 @@ public class MainActivity extends Activity {
         public DesktopView(Activity activity) {
             super(activity);
             setBackgroundColor(Color.rgb(12, 12, 12));
+            setClickable(true);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
             dragThreshold = 12f * getResources().getDisplayMetrics().density;
         }
 
@@ -605,42 +867,69 @@ public class MainActivity extends Activity {
             if (inputSender == null || drawRect.isEmpty()) {
                 return true;
             }
-            float x = event.getX();
-            float y = event.getY();
-            if (!drawRect.contains(x, y)) {
-                return true;
-            }
+            float rawX = event.getX();
+            float rawY = event.getY();
+            float x = clamp(rawX, drawRect.left, drawRect.right);
+            float y = clamp(rawY, drawRect.top, drawRect.bottom);
             float nx = (x - drawRect.left) / drawRect.width();
             float ny = (y - drawRect.top) / drawRect.height();
             try {
                 if (action == MotionEvent.ACTION_DOWN) {
+                    requestFocus();
+                    touchpadMode = !drawRect.contains(rawX, rawY);
                     dragging = false;
-                    downX = x;
-                    downY = y;
+                    downX = rawX;
+                    downY = rawY;
+                    lastX = rawX;
+                    lastY = rawY;
                     downNx = clamp(nx);
                     downNy = clamp(ny);
                     downAt = System.currentTimeMillis();
-                    sendPointer("move", nx, ny);
+                    if (!touchpadMode) {
+                        sendPointer("move", nx, ny);
+                    }
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                     if (dragging) {
-                        sendPointer("up", nx, ny);
+                        if (!touchpadMode) {
+                            sendPointer("up", nx, ny);
+                        }
                     } else if (action == MotionEvent.ACTION_UP && System.currentTimeMillis() - downAt < 800) {
-                        sendPointer("click", nx, ny);
+                        if (touchpadMode) {
+                            sendCurrentPointer("click_current");
+                        } else {
+                            sendPointer("click", nx, ny);
+                        }
                     }
                     dragging = false;
                 } else if (action == MotionEvent.ACTION_MOVE) {
-                    float dx = x - downX;
-                    float dy = y - downY;
+                    float dx = rawX - downX;
+                    float dy = rawY - downY;
                     if (!dragging && Math.hypot(dx, dy) >= dragThreshold) {
                         dragging = true;
-                        sendPointer("down", downNx, downNy);
+                        if (!touchpadMode) {
+                            sendPointer("down", downNx, downNy);
+                        }
                     }
-                    sendPointer("move", nx, ny);
+                    if (touchpadMode) {
+                        if (dragging) {
+                            sendRelativePointer(rawX - lastX, rawY - lastY);
+                        }
+                    } else {
+                        sendPointer("move", nx, ny);
+                    }
+                    lastX = rawX;
+                    lastY = rawY;
                 } else {
                     return true;
                 }
             } catch (Exception ignored) {
             }
+            return true;
+        }
+
+        @Override
+        public boolean performClick() {
+            super.performClick();
             return true;
         }
 
@@ -653,12 +942,37 @@ public class MainActivity extends Activity {
             inputSender.send(message);
         }
 
+        private void sendCurrentPointer(String event) throws Exception {
+            JSONObject message = new JSONObject();
+            message.put("event", event);
+            message.put("button", "left");
+            inputSender.send(message);
+        }
+
+        private void sendRelativePointer(float dx, float dy) throws Exception {
+            JSONObject message = new JSONObject();
+            message.put("event", "move_relative");
+            message.put("dx", dx);
+            message.put("dy", dy);
+            inputSender.send(message);
+        }
+
         private static float clamp(float value) {
             if (value < 0f) {
                 return 0f;
             }
             if (value > 1f) {
                 return 1f;
+            }
+            return value;
+        }
+
+        private static float clamp(float value, float min, float max) {
+            if (value < min) {
+                return min;
+            }
+            if (value > max) {
+                return max;
             }
             return value;
         }

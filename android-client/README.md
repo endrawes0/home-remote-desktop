@@ -36,6 +36,7 @@ Controls:
 
 - Tap the remote screen to left-click.
 - Drag on the remote screen to hold and move the left mouse button.
-- Use the text field and **Type** button to send typed text to the server.
+- When the Windows server detects a focused text field, Android opens the soft keyboard and sends typed text directly to the server.
+- Use the text field and **Type** button as a fallback to send typed text manually.
 - Use **Enter** to press Enter on the server.
 - Use **Fullscreen** to hide the connection controls. Two-finger tap the remote screen to toggle fullscreen back off.
