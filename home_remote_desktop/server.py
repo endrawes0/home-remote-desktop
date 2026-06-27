@@ -402,42 +402,59 @@ class RemoteDesktopServer:
     def start(self) -> None:
         discovery = threading.Thread(target=self._discovery_loop, daemon=True)
         discovery.start()
-        self._tcp_loop()
+        try:
+            self._tcp_loop()
+        except KeyboardInterrupt:
+            print("\nStopping server.")
+            self.stop_event.set()
 
     def _discovery_loop(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", DISCOVERY_PORT))
-        while not self.stop_event.is_set():
-            try:
-                data, addr = sock.recvfrom(2048)
-            except OSError:
-                break
-            if data != DISCOVER_REQUEST:
-                continue
-            reply = {
-                "type": ANNOUNCE_TYPE,
-                "name": self.name,
-                "port": self.port,
-                "id": socket.gethostname(),
-                "requires_passcode": True,
-            }
-            sock.sendto(json.dumps(reply, separators=(",", ":")).encode("utf-8"), addr)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(0.5)
+            sock.bind(("", DISCOVERY_PORT))
+            while not self.stop_event.is_set():
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if data != DISCOVER_REQUEST:
+                    continue
+                reply = {
+                    "type": ANNOUNCE_TYPE,
+                    "name": self.name,
+                    "port": self.port,
+                    "id": socket.gethostname(),
+                    "requires_passcode": True,
+                }
+                sock.sendto(json.dumps(reply, separators=(",", ":")).encode("utf-8"), addr)
+        finally:
+            sock.close()
 
     def _tcp_loop(self) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self.host, self.port))
-        server.listen(5)
-        print(f"Server: {self.name}")
-        print(f"Address: {socket_ipv4()}:{self.port}")
-        print(f"Discovery UDP port: {DISCOVERY_PORT}")
-        print(f"Passcode: {self.passcode}")
-        print("Waiting for a client. Press Ctrl+C to stop.")
-        while not self.stop_event.is_set():
-            client, addr = server.accept()
-            print(f"Client connected from {addr[0]}:{addr[1]}")
-            threading.Thread(target=self._handle_client, args=(client, addr), daemon=True).start()
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.settimeout(0.5)
+            server.bind((self.host, self.port))
+            server.listen(5)
+            print(f"Server: {self.name}")
+            print(f"Address: {socket_ipv4()}:{self.port}")
+            print(f"Discovery UDP port: {DISCOVERY_PORT}")
+            print(f"Passcode: {self.passcode}")
+            print("Waiting for a client. Press Ctrl+C to stop.")
+            while not self.stop_event.is_set():
+                try:
+                    client, addr = server.accept()
+                except socket.timeout:
+                    continue
+                print(f"Client connected from {addr[0]}:{addr[1]}")
+                threading.Thread(target=self._handle_client, args=(client, addr), daemon=True).start()
+        finally:
+            server.close()
 
     def _handle_client(self, client: socket.socket, addr: tuple[str, int]) -> None:
         alive: threading.Event | None = None
