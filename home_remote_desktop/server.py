@@ -243,7 +243,7 @@ class MssCapture(CaptureBackend):
     def __init__(self, monitor_index: int = 1) -> None:
         import mss
 
-        self.screen = mss.mss()
+        self.screen = mss.MSS()
         if monitor_index < 0 or monitor_index >= len(self.screen.monitors):
             raise ValueError(f"invalid MSS monitor index {monitor_index}; available 0-{len(self.screen.monitors) - 1}")
         monitor = self.screen.monitors[monitor_index]
